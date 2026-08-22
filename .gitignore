@@ -1,0 +1,27 @@
+# 本机或生产环境配置：只提交 app.php.example
+/config/app.php
+!/config/app.php.example
+.env
+.env.*
+
+# 运行数据与自动下载的图标
+/storage/*
+!/storage/.gitkeep
+/public/assets/icons/*
+!/public/assets/icons/.gitkeep
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+
+# 部署和排查过程文件，不属于公开源码
+/research/
+/todo.md
+/verification-notes.md
+/tests/browser-checkpoint.md
+
+# 编辑器与操作系统文件
+.DS_Store
+.idea/
+.vscode/
+*~

@@ -1,0 +1,30 @@
+<?php
+/**
+ * 公开仓库示例配置。
+ *
+ * 复制为 config/app.php 后，必须先替换 default_admin 中的用户名和密码，
+ * 再首次访问系统创建数据库。config/app.php 已被 .gitignore 排除，不会被提交。
+ */
+return array(
+    'app_name' => '站界导航',
+    'base_path' => dirname(__DIR__),
+    'db_path' => dirname(__DIR__) . '/storage/navigation.sqlite',
+    'icon_dir' => dirname(__DIR__) . '/public/assets/icons',
+    'icon_web_path' => '/assets/icons',
+    'session_name' => 'navigator_admin',
+    'default_admin' => array(
+        'username' => 'admin',
+        'password' => 'CHANGE_THIS_BEFORE_FIRST_RUN',
+    ),
+    'http' => array(
+        'connect_timeout' => 5,
+        'timeout' => 12,
+        'max_html_bytes' => 1048576,
+        'max_icon_bytes' => 524288,
+        'user_agent' => 'SiteNavigator/1.0 (+https://example.invalid)',
+    ),
+    'health' => array(
+        'success_codes' => array(200, 201, 202, 203, 204, 301, 302, 303, 307, 308),
+        'stale_after_seconds' => 600,
+    ),
+);
