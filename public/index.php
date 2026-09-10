@@ -1,10 +1,45 @@
 <?php
 require_once dirname(__DIR__) . '/app/bootstrap.php';
 
-$sort = isset($_GET['sort']) ? $_GET['sort'] : 'priority';
-$allowedSorts = array('priority', 'popular', 'latest');
+function public_domain_path_host($url)
+{
+    $host = strtolower((string) parse_url($url, PHP_URL_HOST));
+    return preg_replace('/^www\./i', 'www.', $host);
+}
+
+$prettyDomainPath = trim((string) parse_url(isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '/', PHP_URL_PATH), '/');
+if ($prettyDomainPath !== '' && strpos($prettyDomainPath, '/') === false && strpos($prettyDomainPath, '.') !== false && !preg_match('/\.(?:php|css|js|ico|png|jpg|jpeg|gif|svg|webp)$/i', $prettyDomainPath)) {
+    $prettyHost = strtolower(rawurldecode($prettyDomainPath));
+    $prettyWebsite = null;
+    foreach (db()->query('SELECT * FROM websites WHERE is_active = 1') as $candidate) {
+        if (public_domain_path_host($candidate['primary_url']) === $prettyHost || ($candidate['backup_url'] && public_domain_path_host($candidate['backup_url']) === $prettyHost)) {
+            $prettyWebsite = $candidate;
+            break;
+        }
+    }
+    if ($prettyWebsite) {
+        $_GET['id'] = (int) $prettyWebsite['id'];
+        require __DIR__ . '/go.php';
+        exit;
+    }
+}
+
+$sortVisibility = array(
+    'priority' => setting('home_sort_priority_visible', '1') === '1',
+    'popular' => setting('home_sort_popular_visible', '1') === '1',
+    'latest' => setting('home_sort_latest_visible', '1') === '1',
+);
+$allowedSorts = array_keys(array_filter($sortVisibility));
+if (!$allowedSorts) {
+    $allowedSorts = array('priority');
+}
+$sortDefault = setting('home_sort_default', 'priority');
+if (!in_array($sortDefault, $allowedSorts, true)) {
+    $sortDefault = $allowedSorts[0];
+}
+$sort = isset($_GET['sort']) ? $_GET['sort'] : $sortDefault;
 if (!in_array($sort, $allowedSorts, true)) {
-    $sort = 'priority';
+    $sort = $sortDefault;
 }
 $query = isset($_GET['q']) ? trim($_GET['q']) : '';
 
@@ -31,6 +66,10 @@ $statement->execute($params);
 $websites = $statement->fetchAll();
 
 $categories = all_categories(true);
+$homeMobileGridColumns = in_array((int) setting('home_mobile_grid_columns', '1'), array(1, 2), true) ? (int) setting('home_mobile_grid_columns', '1') : 1;
+$homeGridColumns = in_array((int) setting('home_grid_columns', '4'), array(3, 4, 5, 6), true) ? (int) setting('home_grid_columns', '4') : 4;
+$homeCategoryConfig = json_decode(setting('home_category_config', '{}'), true);
+if (!is_array($homeCategoryConfig)) { $homeCategoryConfig = array(); }
 $grouped = array();
 foreach ($categories as $category) {
     $grouped[$category['id']] = array('category' => $category, 'websites' => array());
@@ -74,14 +113,18 @@ function public_redirect_label($website, $displayMode)
         $host = parse_url($website['primary_url'], PHP_URL_HOST);
         return $host ? $host : $website['primary_url'];
     }
-    return '/go.php?id=' . (int) $website['id'];
+    return '/go/?id=' . (int) $website['id'];
 }
 function public_card_href($website, $redirectMode)
 {
     if ($redirectMode === 'domain_direct') {
         return $website['primary_url'];
     }
-    return '/go.php?id=' . (int) $website['id'];
+    if ($redirectMode === 'domain_interstitial' || $redirectMode === 'domain_interstitial_direct') {
+        $host = public_domain_path_host($website['primary_url']);
+        return '/go/?url=' . $website['primary_url'];
+    }
+    return '/go/?id=' . (int) $website['id'];
 }
 ?>
 <!doctype html>
@@ -102,7 +145,7 @@ function public_card_href($website, $redirectMode)
     <nav class="category-nav" aria-label="网站分类">
       <?php foreach ($grouped as $group): ?>
         <?php if (count($group['websites']) > 0): ?>
-          <a href="#<?= e($group['category']['slug']) ?>"><?= e($group['category']['name']) ?></a>
+          <?php $navConfig = isset($homeCategoryConfig[(int) $group['category']['id']]) ? $homeCategoryConfig[(int) $group['category']['id']] : array('mode' => 'home'); ?><a href="<?= $navConfig['mode'] === 'page' ? e('/category/?slug=' . rawurlencode($group['category']['slug'])) : '#' . e($group['category']['slug']) ?>"><?= e($group['category']['name']) ?></a>
         <?php endif; ?>
       <?php endforeach; ?>
     </nav>
@@ -119,7 +162,7 @@ function public_card_href($website, $redirectMode)
         <button class="search-submit" type="submit" aria-label="搜索网站" data-search-submit><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="5.8"></circle><path d="m16 16 4.2 4.2"></path></svg><span data-search-label>搜索</span></button>
         <span class="search-error" id="site-search-error" role="alert" data-search-error></span>
       </form>
-      <div class="header-actions"><a class="button-secondary" href="/admin/index.php">后台管理</a></div>
+      <div class="header-actions"><label class="theme-picker"><span aria-hidden="true">主题</span><select data-theme-switch aria-label="选择页面主题"><option value="daylight">晴空蓝</option><option value="night">深夜黑</option><option value="forest">森林绿</option><option value="twilight">暮光紫</option><option value="china-red">中国红</option><option value="glazed-yellow">琉璃黄</option><option value="cloud-gray">云雾灰</option></select></label></div>
     </header>
 
     <div class="content">
@@ -127,9 +170,9 @@ function public_card_href($website, $redirectMode)
         <div><h2><?= $query !== '' ? '“' . e($query) . '”的搜索结果' : e($homeHeroTitle) ?></h2><p><?= e($homeHeroDescription) ?></p></div>
         <div class="sort-control" data-sort-control>
           <nav class="sort-tabs" aria-label="排序方式" data-sort-tabs>
-            <a class="<?= $sort === 'priority' ? 'active' : '' ?>" href="<?= e(sort_url('priority', $query)) ?>" data-sort-tab>优先推荐</a>
-            <a class="<?= $sort === 'popular' ? 'active' : '' ?>" href="<?= e(sort_url('popular', $query)) ?>" data-sort-tab>人气最高</a>
-            <a class="<?= $sort === 'latest' ? 'active' : '' ?>" href="<?= e(sort_url('latest', $query)) ?>" data-sort-tab>最新收录</a>
+            <?php if ($sortVisibility['priority']): ?><a class="<?= $sort === 'priority' ? 'active' : '' ?>" href="<?= e(sort_url('priority', $query)) ?>" data-sort-tab>优先推荐</a><?php endif; ?>
+            <?php if ($sortVisibility['popular']): ?><a class="<?= $sort === 'popular' ? 'active' : '' ?>" href="<?= e(sort_url('popular', $query)) ?>" data-sort-tab>人气最高</a><?php endif; ?>
+            <?php if ($sortVisibility['latest']): ?><a class="<?= $sort === 'latest' ? 'active' : '' ?>" href="<?= e(sort_url('latest', $query)) ?>" data-sort-tab>最新收录</a><?php endif; ?>
           </nav>
           <span class="sort-switch-status" data-sort-status role="status" aria-live="polite">正在切换排序…</span>
         </div>
@@ -142,14 +185,14 @@ function public_card_href($website, $redirectMode)
       </section>
 
       <?php $hasResult = false; foreach ($grouped as $group): ?>
-        <?php if (count($group['websites']) === 0) { continue; } $hasResult = true; ?>
+        <?php if (count($group['websites']) === 0) { continue; } $hasResult = true; $categoryConfig = isset($homeCategoryConfig[(int) $group['category']['id']]) ? $homeCategoryConfig[(int) $group['category']['id']] : array('limit' => 0, 'mode' => 'home'); $categoryTotal = count($group['websites']); $categoryLimit = isset($categoryConfig['limit']) ? (int) $categoryConfig['limit'] : 0; $shownWebsites = $categoryLimit > 0 ? array_slice($group['websites'], 0, $categoryLimit) : $group['websites']; $categoryHasMore = $categoryLimit > 0 && $categoryTotal > $categoryLimit; ?>
         <section class="category-section" id="<?= e($group['category']['slug']) ?>">
-          <div class="section-head"><h3 class="section-title"><?= e($group['category']['name']) ?> <span class="section-count"><?= count($group['websites']) ?> 个网站</span></h3></div>
+          <div class="section-head"><h3 class="section-title"><?= e($group['category']['name']) ?> <span class="section-count"><?= $categoryTotal ?> 个网站</span></h3><?php if ($categoryHasMore || (isset($categoryConfig['mode']) && $categoryConfig['mode'] === 'page')): ?><a class="section-more" href="<?= e('/category/?slug=' . rawurlencode($group['category']['slug'])) ?>">更多</a><?php endif; ?></div>
           <div class="website-grid">
-            <?php foreach ($group['websites'] as $website): ?>
+            <?php foreach ($shownWebsites as $website): ?>
               <?php $cardHref = public_card_href($website, $redirectMode); $cardLabelMode = $redirectLinkDisplay === 'blank' ? 'blank' : ($redirectMode === 'domain_direct' ? 'domain' : $redirectLinkDisplay); $cardUrlLabel = public_redirect_label($website, $cardLabelMode); ?>
               <article class="site-card">
-                <a class="site-link" href="<?= e($cardHref) ?>" rel="noopener noreferrer" target="_blank" title="打开 <?= e($website['title']) ?>"<?= $redirectMode === 'domain_direct' ? ' data-direct-track-url="/go.php?id=' . (int) $website['id'] . '&amp;track=1"' : '' ?>>
+                <a class="site-link" href="<?= e($cardHref) ?>" rel="noopener noreferrer" target="_blank" title="打开 <?= e($website['title']) ?>"<?= $redirectMode === 'domain_direct' ? ' data-direct-track-url="/go/?id=' . (int) $website['id'] . '&amp;track=1"' : '' ?>>
                   <?php if ($website['icon_path']): ?>
                     <img class="favicon" src="<?= e(website_icon_url($website['icon_path'])) ?>" alt="" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='grid'">
                     <span class="fallback-icon hidden" aria-hidden="true"><?= e(mb_substr($website['title'], 0, 1, 'UTF-8')) ?></span>
@@ -272,5 +315,55 @@ function public_card_href($website, $redirectMode)
   }, true);
 }());
 </script>
+<script>window.siteNavigatorDefaultTheme = <?= json_encode(setting('default_theme', 'daylight')) ?>;</script><script src="/assets/js/app.js?v=<?= (int) filemtime(__DIR__ . '/assets/js/app.js') ?>"></script>
+<style>
+  .website-grid{grid-template-columns:repeat(<?= $homeGridColumns ?>,minmax(0,1fr))}
+  @media(max-width:800px){.website-grid{grid-template-columns:repeat(<?= $homeMobileGridColumns ?>,minmax(0,1fr))}}
+  body.theme-night{--bg:#0b1120;--surface:#111827;--surface-muted:#172033;--ink:#f3f6fb;--muted:#a9b5c7;--line:#29364b;--brand:#78a7ff;--brand-deep:#9abaff;--sidebar:#060a13}
+  body.theme-forest{--bg:#eef7f1;--surface:#fff;--surface-muted:#f4fbf6;--ink:#173329;--muted:#5d766a;--line:#d5e8dc;--brand:#18845a;--brand-deep:#0d6543;--sidebar:#12382b}
+  body.theme-twilight{--bg:#f5f1fb;--surface:#fff;--surface-muted:#faf7ff;--ink:#2b2142;--muted:#76698c;--line:#e4daf1;--brand:#7955c6;--brand-deep:#5a389f;--sidebar:#24183d}
+  body.theme-night .brand-mark,body.theme-forest .brand-mark,body.theme-twilight .brand-mark{background:linear-gradient(135deg,var(--brand),var(--brand-deep));box-shadow:0 8px 18px rgba(0,0,0,.25)}
+  body.theme-night .search input,body.theme-forest .search input,body.theme-twilight .search input{color:var(--ink);background:var(--surface);border-color:var(--line)}
+  body.theme-night .search-submit,body.theme-forest .search-submit,body.theme-twilight .search-submit{background:linear-gradient(135deg,var(--brand),var(--brand-deep));border-color:var(--brand);box-shadow:0 4px 10px rgba(0,0,0,.2)}
+  body.theme-night .website-card,body.theme-night .stat,body.theme-night .empty,body.theme-night .list-panel,body.theme-night .admin-panel,body.theme-forest .website-card,body.theme-forest .stat,body.theme-forest .empty,body.theme-forest .list-panel,body.theme-forest .admin-panel,body.theme-twilight .website-card,body.theme-twilight .stat,body.theme-twilight .empty,body.theme-twilight .list-panel,body.theme-twilight .admin-panel{color:var(--ink);background:var(--surface);border-color:var(--line)}
+  body.theme-night .sort-tabs,body.theme-forest .sort-tabs,body.theme-twilight .sort-tabs{background:var(--surface-muted)}
+  body.theme-night .sort-tabs a.active,body.theme-forest .sort-tabs a.active,body.theme-twilight .sort-tabs a.active{color:var(--brand-deep);background:var(--surface)}
+  body.theme-night .topbar{background:rgba(11,17,32,.88);border-bottom-color:rgba(41,54,75,.9)}
+  body.theme-night .sidebar{box-shadow:10px 0 28px rgba(0,0,0,.18)}
+  body.theme-night .theme-picker{background:#172033;border-color:#354765;box-shadow:0 4px 14px rgba(0,0,0,.28)}
+  body.theme-night .theme-picker select{background:#111827;border-color:#354765}
+  .topbar{gap:28px}
+  .page-intro{flex:0 0 205px;min-width:205px}
+  .page-intro p{white-space:nowrap}
+  .theme-picker{display:inline-flex;align-items:center;gap:7px;height:38px;padding:4px 6px 4px 11px;color:var(--muted);background:color-mix(in srgb,var(--surface) 92%,var(--brand) 8%);border:1px solid var(--line);border-radius:12px;box-shadow:0 3px 10px color-mix(in srgb,var(--brand) 10%,transparent);font-size:12px;font-weight:700;transition:border-color .2s,box-shadow .2s}
+  .theme-picker:hover,.theme-picker:focus-within{border-color:var(--brand);box-shadow:0 4px 14px color-mix(in srgb,var(--brand) 18%,transparent)}
+  .theme-picker select{height:28px;min-width:78px;padding:0 23px 0 9px;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;outline:0;font:inherit;font-size:12px;cursor:pointer}
+  .theme-picker select:focus{border-color:var(--brand);box-shadow:0 0 0 3px color-mix(in srgb,var(--brand) 16%,transparent)}
+  @media(max-width:600px){.sidebar .brand{display:flex;align-items:center;justify-content:space-between;padding-right:0}.sidebar .brand .header-actions{display:flex;margin-left:auto}.sidebar .brand .theme-picker{display:inline-flex;width:auto;height:25px;gap:1px;margin-left:auto;padding:1px 0 1px 2px;border-radius:6px;font-size:9px}.sidebar .brand .theme-picker span{display:inline}.sidebar .brand .theme-picker select{width:45px;max-width:45px;height:21px;min-height:21px;padding:0 5px 0 0;border:0;border-radius:4px;background:transparent;color:var(--ink);font-size:9px;appearance:auto;-webkit-appearance:auto}}
+</style>
+<script>
+  (function(){
+    var actions=document.querySelector('.topbar .header-actions'),brand=document.querySelector('.sidebar .brand');
+    function moveTheme(){if(!actions||!brand)return;if(window.matchMedia('(max-width:600px)').matches){if(actions.parentNode!==brand)brand.appendChild(actions);}else{var topbar=document.querySelector('.topbar');if(topbar&&actions.parentNode!==topbar)topbar.appendChild(actions);}}
+    function syncTheme(){var s=document.querySelector('[data-theme-switch]'),v=s&&s.value||'daylight';document.body.classList.remove('theme-night','theme-forest','theme-twilight');if(v!=='daylight')document.body.classList.add('theme-'+v);try{localStorage.setItem('site-navigator-theme',v);}catch(e){}}
+    if(actions&&brand){brand.addEventListener('click',function(e){if(window.matchMedia('(max-width:600px)').matches&&e.target.closest('.theme-picker')){e.preventDefault();e.stopPropagation();}});moveTheme();window.addEventListener('resize',moveTheme);var s=document.querySelector('[data-theme-switch]');if(s){s.addEventListener('click',function(e){e.preventDefault();e.stopPropagation();});s.addEventListener('pointerdown',function(e){e.stopPropagation();});s.addEventListener('change',function(e){e.stopPropagation();syncTheme();});}}
+  }());
+</script>
 </body>
 </html>
+
+<style>
+body.theme-china-red{--bg:#fff5f5;--surface:#fff;--surface-muted:#fff0f0;--ink:#3b1115;--muted:#8f5b60;--line:#f0c7ca;--brand:#c92d3a;--brand-deep:#921d29;--sidebar:#4b1018}
+body.theme-glazed-yellow{--bg:#fffaf0;--surface:#fff;--surface-muted:#fff5d9;--ink:#3d2b08;--muted:#8a7340;--line:#ead59a;--brand:#d99a08;--brand-deep:#9b6800;--sidebar:#4c3504}
+body.theme-cloud-gray{--bg:#f1f3f5;--surface:#fff;--surface-muted:#e7eaee;--ink:#20262d;--muted:#69737e;--line:#cbd1d8;--brand:#66717d;--brand-deep:#414b55;--sidebar:#2f3740}
+body.theme-china-red .website-card,body.theme-china-red .stat,body.theme-china-red .empty,body.theme-china-red .list-panel,body.theme-china-red .admin-panel,body.theme-glazed-yellow .website-card,body.theme-glazed-yellow .stat,body.theme-glazed-yellow .empty,body.theme-glazed-yellow .list-panel,body.theme-glazed-yellow .admin-panel,body.theme-cloud-gray .website-card,body.theme-cloud-gray .stat,body.theme-cloud-gray .empty,body.theme-cloud-gray .list-panel,body.theme-cloud-gray .admin-panel{color:var(--ink);background:var(--surface);border-color:var(--line)}
+body.theme-china-red .search input,body.theme-glazed-yellow .search input{color:var(--ink);background:var(--surface);border-color:var(--line)}
+body.theme-china-red .search-submit,body.theme-glazed-yellow .search-submit{color:#fff;background:linear-gradient(135deg,var(--brand),var(--brand-deep));border-color:var(--brand)}
+body.theme-china-red .sort-tabs,body.theme-glazed-yellow .sort-tabs{background:var(--surface-muted)}
+body.theme-china-red .sort-tabs a.active,body.theme-glazed-yellow .sort-tabs a.active{color:var(--brand-deep);background:var(--surface)}
+body.theme-china-red .brand-mark,body.theme-glazed-yellow .brand-mark{background:linear-gradient(135deg,var(--brand),var(--brand-deep));box-shadow:0 8px 18px rgba(0,0,0,.2)}
+body.theme-china-red .theme-picker,body.theme-glazed-yellow .theme-picker{border-color:var(--line);background:var(--surface)}
+body.theme-china-red .theme-picker select,body.theme-glazed-yellow .theme-picker select{color:var(--ink);background:var(--surface);border-color:var(--line)}
+</style>
+
+<style>body.theme-cloud-gray .search input,body.theme-cloud-gray .theme-picker select{color:#20262d;background:#fff;border-color:#cbd1d8}body.theme-cloud-gray .search-submit{color:#fff;background:linear-gradient(135deg,#66717d,#414b55);border-color:#66717d}body.theme-cloud-gray .sort-tabs{background:#e7eaee}body.theme-cloud-gray .sort-tabs a.active{color:#414b55;background:#fff}body.theme-cloud-gray .brand-mark{background:linear-gradient(135deg,#88939e,#414b55);box-shadow:0 8px 18px rgba(31,40,49,.2)}body.theme-cloud-gray .theme-picker{border-color:#cbd1d8;background:#fff}</style>

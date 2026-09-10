@@ -127,12 +127,42 @@ function website_list_keyword($value)
     return function_exists('mb_strimwidth') ? mb_strimwidth($keyword, 0, 120, '', 'UTF-8') : substr($keyword, 0, 120);
 }
 
+function normalize_site_date($value, $allowEmpty = false)
+{
+    $value = trim((string) $value);
+    if ($value === '' && $allowEmpty) {
+        return null;
+    }
+    if (!preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $value, $matches) || !checkdate((int) $matches[2], (int) $matches[3], (int) $matches[1])) {
+        throw new InvalidArgumentException('添加日期必须使用有效的 YYYY-MM-DD 日期。');
+    }
+    return $value . ' 00:00:00';
+}
+function random_site_date($start, $end)
+{
+    $startTimestamp = strtotime($start . ' 00:00:00 UTC');
+    $endTimestamp = strtotime($end . ' 00:00:00 UTC');
+    if ($startTimestamp === false || $endTimestamp === false || $startTimestamp > $endTimestamp) {
+        throw new InvalidArgumentException('随机添加日期范围无效，请检查开始日期和结束日期。');
+    }
+    $days = (int) floor(($endTimestamp - $startTimestamp) / 86400);
+    $timestamp = $startTimestamp + ($days > 0 ? random_int(0, $days) * 86400 : 0);
+    return gmdate('Y-m-d 00:00:00', $timestamp);
+}
+function normalize_site_clicks($value)
+{
+    $value = trim((string) $value);
+    if (!preg_match('/^\d+$/', $value)) {
+        throw new InvalidArgumentException('人气必须是大于等于 0 的整数。');
+    }
+    return min((int) $value, 2147483647);
+}
 function bulk_network_operation_limit()
 {
     return 20;
 }
 
-function website_list_return_url($page = 1, $perPage = 20, $categoryId = null, $keyword = null)
+function website_list_return_url($page = 1, $perPage = 20, $categoryId = null, $keyword = null, $sort = null)
 {
     if ($categoryId === null) {
         global $returnCategoryId;
@@ -142,6 +172,10 @@ function website_list_return_url($page = 1, $perPage = 20, $categoryId = null, $
         global $returnKeyword;
         $keyword = isset($returnKeyword) ? $returnKeyword : '';
     }
+    if ($sort === null) {
+        global $returnSort;
+        $sort = isset($returnSort) ? $returnSort : 'latest';
+    }
     $params = array('page' => max(1, (int) $page), 'per_page' => website_list_per_page($perPage));
     if (website_list_category_id($categoryId) > 0) {
         $params['category_id'] = website_list_category_id($categoryId);
@@ -149,6 +183,9 @@ function website_list_return_url($page = 1, $perPage = 20, $categoryId = null, $
     $keyword = website_list_keyword($keyword);
     if ($keyword !== '') {
         $params['keyword'] = $keyword;
+    }
+    if (in_array($sort, array('latest', 'popular', 'priority', 'health_up', 'health_down', 'id_asc', 'id_desc'), true)) {
+        $params['sort'] = $sort;
     }
     return admin_view_url('websites', $params);
 }
@@ -174,6 +211,7 @@ $returnPage = max(1, (int) (isset($_POST['_return_page']) ? $_POST['_return_page
 $returnPerPage = website_list_per_page(isset($_POST['_return_per_page']) ? $_POST['_return_per_page'] : (isset($_GET['per_page']) ? $_GET['per_page'] : 20));
 $returnCategoryId = website_list_category_id(isset($_POST['_return_category_id']) ? $_POST['_return_category_id'] : (isset($_GET['category_id']) ? $_GET['category_id'] : 0));
 $returnKeyword = website_list_keyword(isset($_POST['_return_keyword']) ? $_POST['_return_keyword'] : (isset($_GET['keyword']) ? $_GET['keyword'] : ''));
+$returnSort = isset($_POST['_return_sort']) ? (string) $_POST['_return_sort'] : (isset($_GET['sort']) ? (string) $_GET['sort'] : 'latest');
 
 if ($action === 'login') {
     verify_csrf();
@@ -323,7 +361,7 @@ if ($action !== '') {
             $linkDisplay = isset($_POST['redirect_link_display']) ? $_POST['redirect_link_display'] : 'id';
             $delayInput = trim(isset($_POST['redirect_interstitial_delay']) ? $_POST['redirect_interstitial_delay'] : '2.6');
             $template = trim(isset($_POST['redirect_interstitial_template']) ? $_POST['redirect_interstitial_template'] : '');
-            if (!in_array($redirectMode, array('direct', 'interstitial', 'domain_direct'), true)) {
+            if (!in_array($redirectMode, array('direct', 'interstitial', 'domain_direct', 'domain_interstitial', 'domain_interstitial_direct'), true)) {
                 throw new InvalidArgumentException('跳转模式无效。');
             }
             if (!in_array($linkDisplay, array('domain', 'id', 'blank'), true)) {
@@ -351,6 +389,38 @@ if ($action !== '') {
             redirect_to('/admin/index.php#redirect-settings');
         }
 
+        if ($action === 'batch_category_display_settings') {
+            $selected = isset($_POST['category_ids']) && is_array($_POST['category_ids']) ? array_map('intval', $_POST['category_ids']) : array();
+            if (!$selected) { throw new InvalidArgumentException('请至少选择一个分类。'); }
+            $limit = max(0, min(500, (int) (isset($_POST['batch_home_category_limit']) ? $_POST['batch_home_category_limit'] : 0)));
+            $mode = isset($_POST['batch_home_category_mode']) && $_POST['batch_home_category_mode'] === 'page' ? 'page' : 'home';
+            $categoryConfig = json_decode(setting('home_category_config', '{}'), true);
+            if (!is_array($categoryConfig)) { $categoryConfig = array(); }
+            foreach ($selected as $categoryId) { $categoryConfig[$categoryId] = array('limit' => $limit, 'mode' => $mode); }
+            $statement = db()->prepare('INSERT OR REPLACE INTO settings (setting_key, setting_value, updated_at) VALUES (:key, :value, :updated_at)');
+            $statement->execute(array(':key' => 'home_category_config', ':value' => json_encode($categoryConfig, JSON_UNESCAPED_UNICODE), ':updated_at' => now_utc()));
+            flash('success', '已批量更新 ' . count($selected) . ' 个分类的首页显示设置。');
+            redirect_to('/admin/categories.php#categories');
+        }
+
+        if ($action === 'save_category_display_settings') {
+            $categoryConfig = json_decode(setting('home_category_config', '{}'), true);
+            if (!is_array($categoryConfig)) { $categoryConfig = array(); }
+            $postedLimits = isset($_POST['home_category_limit']) && is_array($_POST['home_category_limit']) ? $_POST['home_category_limit'] : array();
+            $postedModes = isset($_POST['home_category_mode']) && is_array($_POST['home_category_mode']) ? $_POST['home_category_mode'] : array();
+            foreach (db()->query('SELECT id FROM categories WHERE is_active = 1 ORDER BY sort_order ASC, id ASC')->fetchAll(PDO::FETCH_COLUMN) as $categoryId) {
+                $categoryId = (int) $categoryId;
+                $current = isset($categoryConfig[$categoryId]) && is_array($categoryConfig[$categoryId]) ? $categoryConfig[$categoryId] : array();
+                if (array_key_exists($categoryId, $postedLimits)) { $current['limit'] = max(0, min(500, (int) $postedLimits[$categoryId])); }
+                if (array_key_exists($categoryId, $postedModes)) { $current['mode'] = $postedModes[$categoryId] === 'page' ? 'page' : 'home'; }
+                $categoryConfig[$categoryId] = array('limit' => isset($current['limit']) ? (int) $current['limit'] : 0, 'mode' => isset($current['mode']) && $current['mode'] === 'page' ? 'page' : 'home');
+            }
+            $statement = db()->prepare('INSERT OR REPLACE INTO settings (setting_key, setting_value, updated_at) VALUES (:key, :value, :updated_at)');
+            $statement->execute(array(':key' => 'home_category_config', ':value' => json_encode($categoryConfig, JSON_UNESCAPED_UNICODE), ':updated_at' => now_utc()));
+            flash('success', '分类显示设置已保存。');
+            redirect_to('/admin/categories.php#categories');
+        }
+
         if ($action === 'save_site_settings') {
             $siteNameInput = trim(isset($_POST['site_name']) ? $_POST['site_name'] : setting('site_name', app_config()['app_name']));
             $siteSubtitleInput = trim(isset($_POST['site_subtitle']) ? $_POST['site_subtitle'] : setting('site_subtitle', '发现值得访问的网站'));
@@ -364,6 +434,41 @@ if ($action !== '') {
             $homeHeroDescriptionInput = trim(isset($_POST['home_hero_description']) ? $_POST['home_hero_description'] : setting('home_hero_description', '发现值得访问的网站。所有跳转优先使用可用的主地址，主地址异常时自动尝试备用地址。'));
             $homeSidebarHealthInput = trim(isset($_POST['home_sidebar_health']) ? $_POST['home_sidebar_health'] : setting('home_sidebar_health', '主备域名自动检测'));
             $homeSidebarIconInput = trim(isset($_POST['home_sidebar_icon']) ? $_POST['home_sidebar_icon'] : setting('home_sidebar_icon', '图标同步保存至本地'));
+            $homeSortDefaultInput = isset($_POST['home_sort_default']) ? $_POST['home_sort_default'] : setting('home_sort_default', 'priority');
+            $defaultThemeInput = isset($_POST['default_theme']) ? $_POST['default_theme'] : setting('default_theme', 'daylight');
+            $homeGridColumnsInput = isset($_POST['home_grid_columns']) ? (int) $_POST['home_grid_columns'] : (int) setting('home_grid_columns', '4');
+            $categoryGridColumnsInput = isset($_POST['category_grid_columns']) ? (int) $_POST['category_grid_columns'] : (int) setting('category_grid_columns', '4');
+            $categoryPageSizeInput = isset($_POST['category_page_size']) ? (int) $_POST['category_page_size'] : (int) setting('category_page_size', '0');
+            $homeMobileGridColumnsInput = isset($_POST['home_mobile_grid_columns']) ? (int) $_POST['home_mobile_grid_columns'] : (int) setting('home_mobile_grid_columns', '1');
+            $categoryMobileGridColumnsInput = isset($_POST['category_mobile_grid_columns']) ? (int) $_POST['category_mobile_grid_columns'] : (int) setting('category_mobile_grid_columns', '1');
+            if (!in_array($homeGridColumnsInput, array(3, 4, 5, 6), true) || !in_array($categoryGridColumnsInput, array(3, 4, 5, 6), true) || !in_array($categoryPageSizeInput, array(0, 12, 24, 36, 48, 60, 100), true) || !in_array($homeMobileGridColumnsInput, array(1, 2), true) || !in_array($categoryMobileGridColumnsInput, array(1, 2), true)) { throw new InvalidArgumentException('网站列表布局设置无效。'); }
+            if (!in_array($defaultThemeInput, array('daylight', 'night', 'forest', 'twilight', 'china-red', 'glazed-yellow', 'cloud-gray'), true)) {
+                throw new InvalidArgumentException('默认主题无效。');
+            }
+            $homeSortPriorityVisible = isset($_POST['home_sort_priority_visible']) ? '1' : '0';
+            $homeSortPopularVisible = isset($_POST['home_sort_popular_visible']) ? '1' : '0';
+            $homeSortLatestVisible = isset($_POST['home_sort_latest_visible']) ? '1' : '0';
+            $homeCategoryConfig = json_decode(setting('home_category_config', '{}'), true);
+            if (!is_array($homeCategoryConfig)) { $homeCategoryConfig = array(); }
+            $postedLimits = isset($_POST['home_category_limit']) && is_array($_POST['home_category_limit']) ? $_POST['home_category_limit'] : array();
+            $postedModes = isset($_POST['home_category_mode']) && is_array($_POST['home_category_mode']) ? $_POST['home_category_mode'] : array();
+            foreach (db()->query('SELECT id FROM categories WHERE is_active = 1 ORDER BY sort_order ASC, id ASC')->fetchAll(PDO::FETCH_COLUMN) as $categoryId) {
+                $categoryId = (int) $categoryId;
+                $current = isset($homeCategoryConfig[$categoryId]) && is_array($homeCategoryConfig[$categoryId]) ? $homeCategoryConfig[$categoryId] : array();
+                if (array_key_exists($categoryId, $postedLimits)) { $current['limit'] = max(0, min(500, (int) $postedLimits[$categoryId])); }
+                if (array_key_exists($categoryId, $postedModes)) { $current['mode'] = $postedModes[$categoryId] === 'page' ? 'page' : 'home'; }
+                $homeCategoryConfig[$categoryId] = array('limit' => isset($current['limit']) ? (int) $current['limit'] : 0, 'mode' => isset($current['mode']) && $current['mode'] === 'page' ? 'page' : 'home');
+            }
+            if (!in_array($homeSortDefaultInput, array('priority', 'popular', 'latest'), true)) {
+                throw new InvalidArgumentException('首页默认排序无效。');
+            }
+            $sortVisible = array('priority' => $homeSortPriorityVisible === '1', 'popular' => $homeSortPopularVisible === '1', 'latest' => $homeSortLatestVisible === '1');
+            if (!$sortVisible[$homeSortDefaultInput]) {
+                throw new InvalidArgumentException('默认排序必须是已显示的排序方式。');
+            }
+            if (!in_array(true, $sortVisible, true)) {
+                throw new InvalidArgumentException('至少需要显示一个首页排序方式。');
+            }
             if ($siteNameInput === '') {
                 throw new InvalidArgumentException('网站名不能为空。');
             }
@@ -401,6 +506,17 @@ if ($action !== '') {
                 'home_hero_description' => $homeHeroDescriptionInput,
                 'home_sidebar_health' => $homeSidebarHealthInput,
                 'home_sidebar_icon' => $homeSidebarIconInput,
+                'home_sort_default' => $homeSortDefaultInput,
+                'default_theme' => $defaultThemeInput,
+                'home_grid_columns' => (string) $homeGridColumnsInput,
+                'category_grid_columns' => (string) $categoryGridColumnsInput,
+                'category_page_size' => (string) $categoryPageSizeInput,
+                'home_mobile_grid_columns' => (string) $homeMobileGridColumnsInput,
+                'category_mobile_grid_columns' => (string) $categoryMobileGridColumnsInput,
+                'home_category_config' => json_encode($homeCategoryConfig, JSON_UNESCAPED_UNICODE),
+                'home_sort_priority_visible' => $homeSortPriorityVisible,
+                'home_sort_popular_visible' => $homeSortPopularVisible,
+                'home_sort_latest_visible' => $homeSortLatestVisible,
             );
             $statement = db()->prepare('INSERT OR REPLACE INTO settings (setting_key, setting_value, updated_at) VALUES (:key, :value, :updated_at)');
             foreach ($settings as $key => $value) {
@@ -521,7 +637,7 @@ if ($action !== '') {
             foreach (db()->query('SELECT id, name FROM categories')->fetchAll() as $category) {
                 $categoryMap[mb_strtolower(trim($category['name']), 'UTF-8')] = (int) $category['id'];
             }
-            $insert = db()->prepare('INSERT INTO websites (category_id, title, description, primary_url, backup_url, icon_path, sort_order, is_active, is_featured, created_at, updated_at) VALUES (:category_id, :title, :description, :primary_url, :backup_url, :icon_path, :sort_order, :is_active, :is_featured, :created_at, :updated_at)');
+            $insert = db()->prepare('INSERT INTO websites (category_id, title, description, primary_url, backup_url, icon_path, sort_order, clicks, is_active, is_featured, created_at, updated_at) VALUES (:category_id, :title, :description, :primary_url, :backup_url, :icon_path, :sort_order, :clicks, :is_active, :is_featured, :created_at, :updated_at)');
             $imported = 0;
             $skipped = array();
             $line = 1;
@@ -735,6 +851,12 @@ if ($action !== '') {
             if (!$categoryStatement->fetch()) {
                 throw new InvalidArgumentException('所选分类不存在。');
             }
+            $createdAtInput = isset($_POST['created_at']) ? $_POST['created_at'] : '';
+            $createdAt = normalize_site_date($createdAtInput, $action === 'save_site');
+            if ($createdAt === null) {
+                $createdAt = now_utc();
+            }
+            $clicks = normalize_site_clicks(isset($_POST['clicks']) ? $_POST['clicks'] : '0');
             $payload = array(
                 ':category_id' => $categoryId,
                 ':title' => mb_strimwidth($title, 0, 120, '', 'UTF-8'),
@@ -745,11 +867,12 @@ if ($action !== '') {
                 ':is_active' => isset($_POST['is_active']) ? 1 : 0,
                 ':is_featured' => isset($_POST['is_featured']) ? 1 : 0,
                 ':updated_at' => now_utc(),
+                ':created_at' => $createdAt,
+                ':clicks' => $clicks,
             );
             if ($action === 'save_site') {
                 assert_site_hosts_available($primaryUrl, $backupUrl);
                 $statement = db()->prepare('INSERT INTO websites (category_id, title, description, primary_url, backup_url, icon_path, sort_order, is_active, is_featured, created_at, updated_at) VALUES (:category_id, :title, :description, :primary_url, :backup_url, :icon_path, :sort_order, :is_active, :is_featured, :created_at, :updated_at)');
-                $payload[':created_at'] = now_utc();
                 $payload[':icon_path'] = default_site_icon_path();
                 $statement->execute($payload);
                 $siteId = (int) db()->lastInsertId();
@@ -766,12 +889,47 @@ if ($action !== '') {
                 flash('success', '已收录“' . $payload[':title'] . '”，标题和介绍已同步' . $iconMessage);
             } else {
                 $siteId = (int) $_POST['website_id'];
-                if (!get_website($siteId)) {
-                    throw new RuntimeException('网站不存在。');
+                $newSiteId = (int) (isset($_POST['new_website_id']) ? $_POST['new_website_id'] : $siteId);
+                if ($siteId <= 0 || $newSiteId <= 0 || !get_website($siteId)) {
+                    throw new RuntimeException('网站不存在或 ID 无效。');
                 }
                 assert_site_hosts_available($primaryUrl, $backupUrl, $siteId);
+                if ($newSiteId !== $siteId) {
+                    $existing = db()->prepare('SELECT id FROM websites WHERE id = :id LIMIT 1');
+                    $existing->execute(array(':id' => $newSiteId));
+                    if ($existing->fetch()) {
+                        throw new InvalidArgumentException('目标 ID 已被其他网站使用，请换一个 ID。');
+                    }
+                    $pdo = db();
+                    $temporaryId = max($siteId, $newSiteId) + 1000000;
+                    try {
+                        $pdo->beginTransaction();
+                        $pdo->exec('PRAGMA defer_foreign_keys = ON');
+                        $moveHealth = $pdo->prepare('UPDATE website_health SET website_id = :new_id WHERE website_id = :old_id');
+                        $moveLogs = $pdo->prepare('UPDATE redirect_logs SET website_id = :new_id WHERE website_id = :old_id');
+                        $moveVisits = $pdo->prepare('UPDATE website_device_visits SET website_id = :new_id WHERE website_id = :old_id');
+                        $moveWebsite = $pdo->prepare('UPDATE websites SET id = :new_id WHERE id = :old_id');
+                        $move = array(':new_id' => $temporaryId, ':old_id' => $siteId);
+                        $moveHealth->execute($move);
+                        $moveLogs->execute($move);
+                        $moveVisits->execute($move);
+                        $moveWebsite->execute($move);
+                        $move = array(':new_id' => $newSiteId, ':old_id' => $temporaryId);
+                        $moveHealth->execute($move);
+                        $moveLogs->execute($move);
+                        $moveVisits->execute($move);
+                        $moveWebsite->execute($move);
+                        $pdo->commit();
+                    } catch (Exception $exception) {
+                        if ($pdo->inTransaction()) {
+                            $pdo->rollBack();
+                        }
+                        throw new RuntimeException('网站 ID 修改失败，数据库已回滚：' . $exception->getMessage());
+                    }
+                    $siteId = $newSiteId;
+                }
                 $payload[':id'] = $siteId;
-                $statement = db()->prepare('UPDATE websites SET category_id=:category_id, title=:title, description=:description, primary_url=:primary_url, backup_url=:backup_url, sort_order=:sort_order, is_active=:is_active, is_featured=:is_featured, updated_at=:updated_at WHERE id=:id');
+                $statement = db()->prepare('UPDATE websites SET category_id=:category_id, title=:title, description=:description, primary_url=:primary_url, backup_url=:backup_url, sort_order=:sort_order, clicks=:clicks, is_active=:is_active, is_featured=:is_featured, created_at=:created_at, updated_at=:updated_at WHERE id=:id');
                 $statement->execute($payload);
                 $iconUrl = trim(isset($_POST['icon_url']) ? $_POST['icon_url'] : '');
                 if ($iconUrl !== '') {
@@ -828,6 +986,11 @@ if ($action !== '') {
             }
             $statement = db()->prepare('UPDATE categories SET name = :name, slug = :slug, sort_order = :sort_order, updated_at = :updated_at WHERE id = :id');
             $statement->execute(array(':name' => $name, ':slug' => $slug, ':sort_order' => $sortOrder, ':updated_at' => now_utc(), ':id' => $id));
+            $categoryConfig = json_decode(setting('home_category_config', '{}'), true);
+            if (!is_array($categoryConfig)) { $categoryConfig = array(); }
+            $categoryConfig[$id] = array('limit' => max(0, min(500, (int) (isset($_POST['home_category_limit']) ? $_POST['home_category_limit'] : 0))), 'mode' => isset($_POST['home_category_mode']) && $_POST['home_category_mode'] === 'page' ? 'page' : 'home');
+            $configStatement = db()->prepare('INSERT OR REPLACE INTO settings (setting_key, setting_value, updated_at) VALUES (:key, :value, :updated_at)');
+            $configStatement->execute(array(':key' => 'home_category_config', ':value' => json_encode($categoryConfig, JSON_UNESCAPED_UNICODE), ':updated_at' => now_utc()));
             flash('success', '分类资料已更新。');
             redirect_to(admin_view_url('categories'));
         }
@@ -876,6 +1039,133 @@ if ($action !== '') {
             }
             flash('success', '分类优先级已更新。');
             redirect_to(admin_view_url('categories'));
+        }
+
+        if ($action === 'shuffle_website_dates') {
+            $startDate = normalize_site_date(isset($_POST['date_start']) ? $_POST['date_start'] : '');
+            $endDate = normalize_site_date(isset($_POST['date_end']) ? $_POST['date_end'] : '');
+            $startDate = substr($startDate, 0, 10);
+            $endDate = substr($endDate, 0, 10);
+            $pdo = db();
+            $ids = array_map('intval', $pdo->query('SELECT id FROM websites ORDER BY id ASC')->fetchAll(PDO::FETCH_COLUMN));
+            if (count($ids) < 1) {
+                throw new RuntimeException('没有可重排添加日期的网站。');
+            }
+            try {
+                $pdo->beginTransaction();
+                $update = $pdo->prepare('UPDATE websites SET created_at = :created_at, updated_at = :updated_at WHERE id = :id');
+                foreach ($ids as $id) {
+                    $update->execute(array(':created_at' => random_site_date($startDate, $endDate), ':updated_at' => now_utc(), ':id' => $id));
+                }
+                $pdo->commit();
+            } catch (Exception $exception) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                throw new RuntimeException('网站添加日期随机重排失败，数据库已回滚：' . $exception->getMessage());
+            }
+            flash('success', '已在 ' . $startDate . ' 至 ' . $endDate . ' 范围内随机重排 ' . count($ids) . ' 个网站的添加日期。');
+            redirect_to(website_list_return_url($returnPage, $returnPerPage));
+        }
+
+        if ($action === 'shuffle_website_clicks') {
+            $minimumClicks = normalize_site_clicks(isset($_POST['clicks_min']) ? $_POST['clicks_min'] : '0');
+            $maximumClicks = normalize_site_clicks(isset($_POST['clicks_max']) ? $_POST['clicks_max'] : '0');
+            if ($minimumClicks > $maximumClicks) {
+                throw new InvalidArgumentException('人气范围无效，最小值不能大于最大值。');
+            }
+            $pdo = db();
+            $ids = array_map('intval', $pdo->query('SELECT id FROM websites ORDER BY id ASC')->fetchAll(PDO::FETCH_COLUMN));
+            if (count($ids) < 1) {
+                throw new RuntimeException('没有可重排人气的网站。');
+            }
+            try {
+                $pdo->beginTransaction();
+                $update = $pdo->prepare('UPDATE websites SET clicks = :clicks, updated_at = :updated_at WHERE id = :id');
+                foreach ($ids as $id) {
+                    $update->execute(array(':clicks' => random_int($minimumClicks, $maximumClicks), ':updated_at' => now_utc(), ':id' => $id));
+                }
+                $pdo->commit();
+            } catch (Exception $exception) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                throw new RuntimeException('网站人气随机重排失败，数据库已回滚：' . $exception->getMessage());
+            }
+            flash('success', '已在 ' . $minimumClicks . '–' . $maximumClicks . ' 范围内随机重排 ' . count($ids) . ' 个网站的人气。');
+            redirect_to(website_list_return_url($returnPage, $returnPerPage));
+        }
+
+        if ($action === 'shuffle_website_ids') {
+            $pdo = db();
+            $minimumId = max(1, (int) (isset($_POST['id_min']) ? $_POST['id_min'] : 1));
+            $maximumId = max(1, (int) (isset($_POST['id_max']) ? $_POST['id_max'] : 0));
+            if ($maximumId < $minimumId) {
+                throw new InvalidArgumentException('真实 ID 范围无效，请检查起始 ID 和结束 ID。');
+            }
+            $ids = array_map('intval', $pdo->query('SELECT id FROM websites ORDER BY id ASC')->fetchAll(PDO::FETCH_COLUMN));
+            if (count($ids) < 2) {
+                throw new RuntimeException('至少需要两个网站才能随机重排真实 ID。');
+            }
+            if (($maximumId - $minimumId + 1) < count($ids)) {
+                throw new InvalidArgumentException('自定义 ID 范围必须至少容纳全部 ' . count($ids) . ' 个网站。');
+            }
+            $targets = range($minimumId, $maximumId);
+            shuffle($targets);
+            $targets = array_slice($targets, 0, count($ids));
+            for ($index = count($targets) - 1; $index > 0; $index--) {
+                $swapIndex = random_int(0, $index);
+                $temporary = $targets[$index];
+                $targets[$index] = $targets[$swapIndex];
+                $targets[$swapIndex] = $temporary;
+            }
+            if ($targets === $ids) {
+                $targets = array_merge(array_slice($targets, 1), array_slice($targets, 0, 1));
+            }
+            $maxId = max(max($ids), $maximumId);
+            $offset = max(1000000, $maxId + count($ids) + 1000);
+            if ($maxId > PHP_INT_MAX - $offset) {
+                throw new RuntimeException('网站 ID 数值过大，无法安全执行重排。');
+            }
+            $temporaryIds = array();
+            foreach ($ids as $id) {
+                $temporaryIds[$id] = $id + $offset;
+            }
+
+            try {
+                $pdo->beginTransaction();
+                $pdo->exec('PRAGMA defer_foreign_keys = ON');
+                $updateHealth = $pdo->prepare('UPDATE website_health SET website_id = :new_id WHERE website_id = :old_id');
+                $updateLogs = $pdo->prepare('UPDATE redirect_logs SET website_id = :new_id WHERE website_id = :old_id');
+                $updateVisits = $pdo->prepare('UPDATE website_device_visits SET website_id = :new_id WHERE website_id = :old_id');
+                $updateWebsites = $pdo->prepare('UPDATE websites SET id = :new_id WHERE id = :old_id');
+                foreach ($ids as $id) {
+                    $params = array(':new_id' => $temporaryIds[$id], ':old_id' => $id);
+                    $updateHealth->execute($params);
+                    $updateLogs->execute($params);
+                    $updateVisits->execute($params);
+                    $updateWebsites->execute($params);
+                }
+                $updateHealth = $pdo->prepare('UPDATE website_health SET website_id = :new_id WHERE website_id = :old_id');
+                $updateLogs = $pdo->prepare('UPDATE redirect_logs SET website_id = :new_id WHERE website_id = :old_id');
+                $updateVisits = $pdo->prepare('UPDATE website_device_visits SET website_id = :new_id WHERE website_id = :old_id');
+                $updateWebsites = $pdo->prepare('UPDATE websites SET id = :new_id WHERE id = :old_id');
+                foreach ($ids as $index => $id) {
+                    $params = array(':new_id' => $targets[$index], ':old_id' => $temporaryIds[$id]);
+                    $updateHealth->execute($params);
+                    $updateLogs->execute($params);
+                    $updateVisits->execute($params);
+                    $updateWebsites->execute($params);
+                }
+                $pdo->commit();
+            } catch (Exception $exception) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                throw new RuntimeException('网站真实 ID 重排失败，数据库已回滚：' . $exception->getMessage());
+            }
+            flash('success', '已在 ' . $minimumId . '–' . $maximumId . ' 范围内随机重排 ' . count($ids) . ' 个网站的真实 ID，关联数据已同步迁移。');
+            redirect_to(website_list_return_url($returnPage, $returnPerPage));
         }
 
         if ($action === 'toggle_site') {
@@ -1054,6 +1344,20 @@ if (!$websiteListCategory) {
 }
 $websitePerPage = website_list_per_page(isset($_GET['per_page']) ? $_GET['per_page'] : $returnPerPage);
 $websiteKeyword = website_list_keyword(isset($_GET['keyword']) ? $_GET['keyword'] : $returnKeyword);
+$websiteSort = isset($_GET['sort']) ? (string) $_GET['sort'] : 'latest';
+$websiteSortOptions = array('latest', 'popular', 'priority', 'health_up', 'health_down', 'id_asc', 'id_desc');
+if (!in_array($websiteSort, $websiteSortOptions, true)) {
+    $websiteSort = 'latest';
+}
+$websiteOrderBy = array(
+    'latest' => 'datetime(w.created_at) DESC, w.id DESC',
+    'popular' => 'w.clicks DESC, w.id DESC',
+    'priority' => 'c.sort_order ASC, w.sort_order ASC, w.title COLLATE NOCASE ASC',
+    'health_up' => "CASE WHEN h.primary_status = 'up' OR h.backup_status = 'up' THEN 0 ELSE 1 END ASC, w.id ASC",
+    'health_down' => "CASE WHEN h.primary_status = 'up' OR h.backup_status = 'up' THEN 1 ELSE 0 END ASC, w.id ASC",
+    'id_asc' => 'w.id ASC',
+    'id_desc' => 'w.id DESC',
+);
 $websiteWhere = array();
 $websiteQueryParams = array();
 if ($websiteListCategoryId > 0) {
@@ -1078,7 +1382,8 @@ $websites = array();
 if ($adminView === 'websites') {
     $websiteListSql = 'SELECT w.*, c.name AS category_name, h.primary_status, h.backup_status, h.primary_checked_at, h.backup_checked_at FROM websites w JOIN categories c ON c.id = w.category_id LEFT JOIN website_health h ON h.website_id = w.id';
     $websiteListSql .= $websiteWhereSql;
-    $websiteListSql .= ' ORDER BY c.sort_order ASC, w.sort_order ASC, w.title COLLATE NOCASE ASC LIMIT :limit OFFSET :offset';
+    $websiteListSql .= ' ORDER BY ' . $websiteOrderBy[$websiteSort];
+    $websiteListSql .= ' LIMIT :limit OFFSET :offset';
     $websiteStatement = db()->prepare($websiteListSql);
     foreach ($websiteQueryParams as $parameter => $value) {
         $websiteStatement->bindValue($parameter, $value, $parameter === ':category_id' ? PDO::PARAM_INT : PDO::PARAM_STR);
@@ -1091,6 +1396,12 @@ if ($adminView === 'websites') {
 $statRows = db()->query("SELECT COUNT(*) AS site_count, SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) AS active_count, SUM(clicks) AS clicks FROM websites")->fetch();
 $healthy = (int) db()->query("SELECT COUNT(*) FROM website_health WHERE primary_status = 'up'")->fetchColumn();
 $siteName = setting('site_name', app_config()['app_name']);
+$defaultTheme = setting('default_theme', 'daylight');
+$homeGridColumnsInput = in_array((int) setting('home_grid_columns', '4'), array(3, 4, 5, 6), true) ? (int) setting('home_grid_columns', '4') : 4;
+$categoryGridColumnsInput = in_array((int) setting('category_grid_columns', '4'), array(3, 4, 5, 6), true) ? (int) setting('category_grid_columns', '4') : 4;
+$categoryPageSizeInput = in_array((int) setting('category_page_size', '0'), array(0, 12, 24, 36, 48, 60, 100), true) ? (int) setting('category_page_size', '0') : 0;
+$homeMobileGridColumnsInput = in_array((int) setting('home_mobile_grid_columns', '1'), array(1, 2), true) ? (int) setting('home_mobile_grid_columns', '1') : 1;
+$categoryMobileGridColumnsInput = in_array((int) setting('category_mobile_grid_columns', '1'), array(1, 2), true) ? (int) setting('category_mobile_grid_columns', '1') : 1;
 $brandMark = setting('brand_mark', 'N');
 $siteSubtitle = setting('site_subtitle', '发现值得访问的网站');
 $seoTitle = setting('seo_title', $siteName . ' - ' . $siteSubtitle);
@@ -1103,6 +1414,8 @@ $homeHeroDescription = setting('home_hero_description', '发现值得访问的�
 $homeSidebarHealth = setting('home_sidebar_health', '主备域名自动检测');
 $homeSidebarIcon = setting('home_sidebar_icon', '图标同步保存至本地');
 $adminUsername = isset($_SESSION['admin_username']) ? $_SESSION['admin_username'] : '';
+$homeCategoryConfig = json_decode(setting('home_category_config', '{}'), true);
+if (!is_array($homeCategoryConfig)) { $homeCategoryConfig = array(); }
 $redirectMode = setting('redirect_mode', 'direct');
 $redirectLinkDisplay = setting('redirect_link_display', 'id');
 $redirectDelay = setting('redirect_interstitial_delay', '2.6');
@@ -1133,32 +1446,37 @@ ob_start(function ($output) use ($redirectDelay) { return str_replace('<input va
         <div class="form-field span-12"><label>首页说明</label><textarea name="home_hero_description" rows="4" maxlength="300" required><?= e($homeHeroDescription) ?></textarea><span class="form-hint">用于首页主标题下方的完整说明。</span></div>
         <div class="form-field span-6"><label>侧栏功能标签一</label><input name="home_sidebar_health" value="<?= e($homeSidebarHealth) ?>" maxlength="80" required><span class="form-hint">默认文案：主备域名自动检测</span></div>
         <div class="form-field span-6"><label>侧栏功能标签二</label><input name="home_sidebar_icon" value="<?= e($homeSidebarIcon) ?>" maxlength="80" required><span class="form-hint">默认文案：图标同步保存至本地</span></div>
-        <div class="span-12"><button class="button" type="submit">保存首页文案</button></div>
+        <fieldset class="form-field span-12 sort-settings"><legend>首页排序标签</legend><div class="sort-settings-grid"><label><input type="checkbox" name="home_sort_priority_visible"<?= setting('home_sort_priority_visible', '1') === '1' ? ' checked' : '' ?>> 优先推荐</label><label><input type="checkbox" name="home_sort_popular_visible"<?= setting('home_sort_popular_visible', '1') === '1' ? ' checked' : '' ?>> 人气最高</label><label><input type="checkbox" name="home_sort_latest_visible"<?= setting('home_sort_latest_visible', '1') === '1' ? ' checked' : '' ?>> 最新收录</label></div><label class="sort-default-label">默认排序 <select name="home_sort_default"><option value="priority"<?= setting('home_sort_default', 'priority') === 'priority' ? ' selected' : '' ?>>优先推荐</option><option value="popular"<?= setting('home_sort_default', 'priority') === 'popular' ? ' selected' : '' ?>>人气最高</option><option value="latest"<?= setting('home_sort_default', 'priority') === 'latest' ? ' selected' : '' ?>>最新收录</option></select></label></fieldset><div class="form-field span-6"><label>默认主题</label><select name="default_theme"><option value="daylight"<?= $defaultTheme === 'daylight' ? ' selected' : '' ?>>晴空蓝</option><option value="night"<?= $defaultTheme === 'night' ? ' selected' : '' ?>>深夜黑</option><option value="forest"<?= $defaultTheme === 'forest' ? ' selected' : '' ?>>森林绿</option><option value="twilight"<?= $defaultTheme === 'twilight' ? ' selected' : '' ?>>暮光紫</option><option value="china-red"<?= $defaultTheme === 'china-red' ? ' selected' : '' ?>>中国红</option><option value="glazed-yellow"<?= $defaultTheme === 'glazed-yellow' ? ' selected' : '' ?>>琉璃黄</option><option value="cloud-gray"<?= $defaultTheme === 'cloud-gray' ? ' selected' : '' ?>>云雾灰</option></select><span class="form-hint">新访客和未选择过主题的用户默认使用此主题。</span></div>
+<fieldset class="form-field span-12 layout-settings"><legend>网站列表布局</legend><div class="layout-settings-grid"><label>首页每行网站数 <select name="home_grid_columns"><option value="3"<?= $homeGridColumnsInput === 3 ? ' selected' : '' ?>>3 个</option><option value="4"<?= $homeGridColumnsInput === 4 ? ' selected' : '' ?>>4 个</option><option value="5"<?= $homeGridColumnsInput === 5 ? ' selected' : '' ?>>5 个</option><option value="6"<?= $homeGridColumnsInput === 6 ? ' selected' : '' ?>>6 个</option></select></label><label>分类页每行网站数 <select name="category_grid_columns"><option value="3"<?= $categoryGridColumnsInput === 3 ? ' selected' : '' ?>>3 个</option><option value="4"<?= $categoryGridColumnsInput === 4 ? ' selected' : '' ?>>4 个</option><option value="5"<?= $categoryGridColumnsInput === 5 ? ' selected' : '' ?>>5 个</option><option value="6"<?= $categoryGridColumnsInput === 6 ? ' selected' : '' ?>>6 个</option></select></label><label>分类页每页显示 <select name="category_page_size"><option value="0"<?= $categoryPageSizeInput === 0 ? ' selected' : '' ?>>全部</option><option value="12"<?= $categoryPageSizeInput === 12 ? ' selected' : '' ?>>12 个</option><option value="24"<?= $categoryPageSizeInput === 24 ? ' selected' : '' ?>>24 个</option><option value="36"<?= $categoryPageSizeInput === 36 ? ' selected' : '' ?>>36 个</option><option value="48"<?= $categoryPageSizeInput === 48 ? ' selected' : '' ?>>48 个</option><option value="60"<?= $categoryPageSizeInput === 60 ? ' selected' : '' ?>>60 个</option><option value="100"<?= $categoryPageSizeInput === 100 ? ' selected' : '' ?>>100 个</option></select></label><label>首页手机版每行 <select name="home_mobile_grid_columns"><option value="1"<?= $homeMobileGridColumnsInput === 1 ? ' selected' : '' ?>>1 个</option><option value="2"<?= $homeMobileGridColumnsInput === 2 ? ' selected' : '' ?>>2 个</option></select></label><label>分类页手机版每行 <select name="category_mobile_grid_columns"><option value="1"<?= $categoryMobileGridColumnsInput === 1 ? ' selected' : '' ?>>1 个</option><option value="2"<?= $categoryMobileGridColumnsInput === 2 ? ' selected' : '' ?>>2 个</option></select></label></div><span class="form-hint">首页和分类页分别控制每行列数；分类页选择“全部”时不分页。</span></fieldset><div class="span-12"><button class="button" type="submit">保存首页文案</button></div>
       </form>
     </section>
     <?php endif; ?>
     <div class="toast-stack" aria-live="polite" aria-atomic="true"><?php if ($notice): ?><aside class="toast toast-success" role="status" data-toast><span class="toast-icon" aria-hidden="true">✓</span><div class="toast-copy"><strong>操作已完成</strong><p><?= e($notice) ?></p></div><button class="toast-close" type="button" data-close-toast aria-label="关闭提示">×</button></aside><?php endif; ?><?php if ($error): ?><aside class="toast toast-error" role="alert" data-toast><span class="toast-icon" aria-hidden="true">!</span><div class="toast-copy"><strong>请注意</strong><p><?= e($error) ?></p></div><button class="toast-close" type="button" data-close-toast aria-label="关闭提示">×</button></aside><?php endif; ?></div>
-    <div class="admin-heading"><div><h1><?= $adminView === 'categories' ? '分类管理' : ($adminView === 'websites' ? '网站列表' : '总览设置') ?></h1><p><?= $adminView === 'categories' ? '独立管理分类名称、标识与展示优先级。' : ($adminView === 'websites' ? '分页查看网站，并进行选择、批量检测、图标同步或删除。' : '管理网站设置、跳转规则与账户安全。') ?></p></div><?php if ($adminView === 'websites'): ?><div class="admin-heading-actions"><button class="button-secondary" type="button" data-open-modal="batchImportModal">批量添加网站</button><button class="button" type="button" data-open-modal="addSiteModal">+ 添加网站</button></div><?php endif; ?></div>
+    <div class="admin-heading"><div><h1><?= $adminView === 'categories' ? '分类管理' : ($adminView === 'websites' ? '网站列表' : '总览设置') ?></h1><p><?= $adminView === 'categories' ? '独立管理分类名称、标识与展示优先级。' : ($adminView === 'websites' ? '分页查看网站，并进行选择、批量检测、图标同步或删除。' : '管理网站设置、跳转规则与账户安全。') ?></p></div><?php if ($adminView === 'websites'): ?><div class="admin-heading-actions"><details class="shuffle-menu"><summary class="button-secondary">随机工具</summary><div class="shuffle-popover">
+<form method="post" class="shuffle-range-form" onsubmit="return confirm('此操作会在自定义范围内随机重排所有网站的真实 ID，并同步迁移关联数据。确定继续吗？');"><input type="hidden" name="action" value="shuffle_website_ids"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><strong>随机重排真实 ID</strong><span>自定义 ID 范围</span><div class="shuffle-fields"><input type="number" name="id_min" min="1" placeholder="起始 ID" required><span>至</span><input type="number" name="id_max" min="1" placeholder="结束 ID" required><button class="button-secondary small" type="submit">执行</button></div></form>
+<form method="post" class="shuffle-range-form" onsubmit="return confirm('确定随机重排所有网站的添加日期吗？');"><input type="hidden" name="action" value="shuffle_website_dates"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><strong>随机重排添加日期</strong><div class="shuffle-fields"><input type="date" name="date_start" required><span>至</span><input type="date" name="date_end" required><button class="button-secondary small" type="submit">执行</button></div></form>
+<form method="post" class="shuffle-range-form" onsubmit="return confirm('确定随机重排所有网站的人气吗？');"><input type="hidden" name="action" value="shuffle_website_clicks"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><strong>随机重排人气</strong><div class="shuffle-fields"><input type="number" name="clicks_min" min="0" required placeholder="最小"><span>至</span><input type="number" name="clicks_max" min="0" required placeholder="最大"><button class="button-secondary small" type="submit">执行</button></div></form>
+</div></details><button class="button-secondary" type="button" data-open-modal="batchImportModal">批量添加网站</button><button class="button" type="button" data-open-modal="addSiteModal">+ 添加网站</button></div><?php endif; ?></div>
     <?php if ($adminView === 'dashboard'): ?><section class="admin-stats"><div class="admin-stat"><strong><?= (int) $statRows['site_count'] ?></strong><span>网站总数</span></div><div class="admin-stat"><strong><?= (int) $statRows['active_count'] ?></strong><span>前台展示中</span></div><div class="admin-stat"><strong><?= $healthy ?></strong><span>主地址可用</span></div><div class="admin-stat"><strong><?= number_format((int) $statRows['clicks']) ?></strong><span>累计跳转</span></div></section><?php endif; ?>
 
     <?php if ($adminView === 'dashboard'): ?><section class="panel" id="site-settings"><h2>网站设置</h2><p>在此管理网站名称、前台简介与搜索引擎展示信息；保存后会立即应用到前台页面。</p><div class="settings-grid"><div class="settings-card"><h3>网站与 SEO</h3><p>SEO 标题、简介和关键词用于浏览器标题及搜索引擎信息。留空时会按网站名和简介自动生成。</p><form method="post" class="grid-form"><input type="hidden" name="action" value="save_site_settings"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><div class="form-field span-6"><label>网站名</label><input name="site_name" value="<?= e($siteName) ?>" maxlength="80" required><span class="form-hint">显示在前台页头和后台品牌区域。</span></div><div class="form-field span-6"><label>网站简介</label><input name="site_subtitle" value="<?= e($siteSubtitle) ?>" maxlength="160" required><span class="form-hint">显示在前台页面主标题下方。</span></div><div class="form-field span-12"><label>SEO 标题</label><input name="seo_title" value="<?= e($seoTitle) ?>" maxlength="120" placeholder="例如：站界导航 - 发现值得访问的网站"><span class="form-hint">建议控制在 60 个中文字符以内。</span></div><div class="form-field span-12"><label>SEO Keywords（关键词）</label><input name="seo_keywords" value="<?= e($seoKeywords) ?>" maxlength="500" placeholder="例如：网站导航,网址导航,优质网站"><span class="form-hint">请用英文逗号分隔关键词。</span></div><div class="form-field span-12"><label>SEO 简介</label><textarea name="seo_description" rows="4" maxlength="300" placeholder="简要说明网站内容和特点"><?= e($seoDescription) ?></textarea><span class="form-hint">建议控制在 120 个中文字符以内。</span></div><div class="span-12"><button class="button" type="submit">保存网站设置</button></div></form></div><div class="settings-card security-card"><h3>账户安全</h3><p>输入当前密码后，可一次保存新的管理员名称和密码。</p><form method="post" class="grid-form"><input type="hidden" name="action" value="update_admin_account"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><div class="form-field span-12"><label>管理员名称</label><input name="username" value="<?= e($adminUsername) ?>" minlength="3" maxlength="60" pattern="[A-Za-z0-9_-]{3,60}" autocomplete="username" required></div><div class="form-field span-12"><label>当前密码</label><input type="password" name="current_password" autocomplete="current-password" required></div><div class="form-field span-6"><label>新密码</label><input type="password" name="new_password" minlength="10" autocomplete="new-password" required></div><div class="form-field span-6"><label>确认新密码</label><input type="password" name="confirm_password" minlength="10" autocomplete="new-password" required></div><div class="span-12"><button class="button-secondary" type="submit">保存账户安全设置</button></div></form></div></div></section>
 
-    <section class="panel" id="redirect-settings"><h2>URL 网站跳转管理</h2><p>系统直跳和过渡页跳转都会经过主备检测与访问记录；直接网站域名转向会让前台卡片 A 链接直接指向网站主域名，不经过系统跳转入口。</p><form method="post" class="grid-form"><input type="hidden" name="action" value="save_redirect_settings"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><div class="form-field span-4"><label>跳转模式</label><select name="redirect_mode"><option value="direct"<?= $redirectMode === 'direct' ? ' selected' : '' ?>>系统直接跳转</option><option value="interstitial"<?= $redirectMode === 'interstitial' ? ' selected' : '' ?>>带跳转页面转向</option><option value="domain_direct"<?= $redirectMode === 'domain_direct' ? ' selected' : '' ?>>直接网站域名转向</option></select><span class="form-hint">域名直连模式下会始终使用网站主域名。</span></div><div class="form-field span-4"><label>前台 URL 显示</label><select name="redirect_link_display"><option value="domain"<?= $redirectLinkDisplay === 'domain' ? ' selected' : '' ?>>显示网站域名</option><option value="id"<?= $redirectLinkDisplay === 'id' ? ' selected' : '' ?>>显示 ID 地址（/go.php?id=1）</option><option value="blank"<?= $redirectLinkDisplay === 'blank' ? ' selected' : '' ?>>空白（隐藏地址）</option></select><span class="form-hint">选择空白后仅隐藏卡片地址文字，不影响点击跳转。</span></div><div class="form-field span-4"><label>自动转向时间</label><input value="2.6 秒" disabled><span class="form-hint">仅过渡页模式下生效。</span></div><div class="form-field span-12"><label>跳转页面模板文案</label><textarea name="redirect_interstitial_template" rows="5"><?= e($redirectTemplate) ?></textarea><span class="form-hint">可用占位符：{{site_title}}、{{site_name}}、{{destination_domain}}、{{continue_url}}。为保证访问安全，模板会作为纯文本显示，不执行 HTML 或脚本。</span></div><div class="span-12"><button class="button" type="submit">保存跳转设置</button></div></form></section><?php endif; ?>
+    <section class="panel" id="redirect-settings"><h2>URL 网站跳转管理</h2><p>系统直跳和过渡页跳转都会经过主备检测与访问记录；直接网站域名转向会让前台卡片 A 链接直接指向网站主域名，不经过系统跳转入口。</p><form method="post" class="grid-form"><input type="hidden" name="action" value="save_redirect_settings"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><div class="form-field span-4"><label>跳转模式</label><select name="redirect_mode"><option value="direct"<?= $redirectMode === 'direct' ? ' selected' : '' ?>>系统直接跳转</option><option value="interstitial"<?= $redirectMode === 'interstitial' ? ' selected' : '' ?>>带跳转页面转向</option><option value="domain_direct"<?= $redirectMode === 'domain_direct' ? ' selected' : '' ?>>直接网站域名转向</option><option value="domain_interstitial"<?= $redirectMode === 'domain_interstitial' ? ' selected' : '' ?>>网站域名带跳转页面转向</option><option value="domain_interstitial_direct"<?= $redirectMode === 'domain_interstitial_direct' ? ' selected' : '' ?>>网站域名带跳转页面直接转向</option></select><span class="form-hint">域名直连模式下会始终使用网站主域名。</span></div><div class="form-field span-4"><label>前台 URL 显示</label><select name="redirect_link_display"><option value="domain"<?= $redirectLinkDisplay === 'domain' ? ' selected' : '' ?>>显示网站域名</option><option value="id"<?= $redirectLinkDisplay === 'id' ? ' selected' : '' ?>>显示 ID 地址（/go/?id=1）</option><option value="blank"<?= $redirectLinkDisplay === 'blank' ? ' selected' : '' ?>>空白（隐藏地址）</option></select><span class="form-hint">选择空白后仅隐藏卡片地址文字，不影响点击跳转。</span></div><div class="form-field span-4"><label>自动转向时间</label><input value="2.6 秒" disabled><span class="form-hint">仅过渡页模式下生效。</span></div><div class="form-field span-12"><label>跳转页面模板文案</label><textarea name="redirect_interstitial_template" rows="5"><?= e($redirectTemplate) ?></textarea><span class="form-hint">可用占位符：{{site_title}}、{{site_name}}、{{destination_domain}}、{{continue_url}}。为保证访问安全，模板会作为纯文本显示，不执行 HTML 或脚本。</span></div><div class="span-12"><button class="button" type="submit">保存跳转设置</button></div></form></section><?php endif; ?>
 
     <?php if ($adminView === 'categories'): ?><section class="panel" id="categories"><h2>分类与优先级</h2><p>优先级数值越小，前台展示越靠前。可直接使用上移、下移快速调整。</p>
-      <div class="table-wrap"><table><thead><tr><th>优先级</th><th>分类名称</th><th>标识</th><th>网站数</th><th>操作</th></tr></thead><tbody>
+      <form method="post" id="batchCategoryForm" class="category-batch-toolbar"><input type="hidden" name="action" value="batch_category_display_settings"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><strong>批量快速更改</strong><label>首页显示 <input type="number" min="0" max="500" name="batch_home_category_limit" value="0"> 个（0=全部）</label><label>分类导航 <select name="batch_home_category_mode"><option value="home">首页分类位</option><option value="page">进入分类页面</option></select></label><button class="button-secondary small" type="submit">应用到勾选分类</button></form><div class="table-wrap"><table><thead><tr><th>选择</th><th>优先级</th><th>分类名称</th><th>标识</th><th>网站数</th><th>首页显示</th><th>分类导航</th><th>操作</th></tr></thead><tbody>
       <?php foreach ($categories as $category): $siteCount = isset($categoryCounts[(int) $category['id']]) ? $categoryCounts[(int) $category['id']] : 0; ?>
-        <tr><td><?= (int) $category['sort_order'] ?></td><td><strong><?= e($category['name']) ?></strong></td><td><code><?= e($category['slug']) ?></code></td><td><?= $siteCount ?></td><td><div class="actions"><button class="button-secondary small" type="button" data-edit-category data-category-id="<?= (int) $category['id'] ?>" data-category-name="<?= e($category['name']) ?>" data-category-slug="<?= e($category['slug']) ?>" data-category-sort-order="<?= (int) $category['sort_order'] ?>">编辑</button><form method="post"><input type="hidden" name="action" value="move_category"><input type="hidden" name="category_id" value="<?= (int) $category['id'] ?>"><input type="hidden" name="direction" value="up"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><button class="button-secondary small">上移</button></form><form method="post"><input type="hidden" name="action" value="move_category"><input type="hidden" name="category_id" value="<?= (int) $category['id'] ?>"><input type="hidden" name="direction" value="down"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><button class="button-secondary small">下移</button></form><?php if ($siteCount === 0): ?><form method="post"><input type="hidden" name="action" value="delete_category"><input type="hidden" name="category_id" value="<?= (int) $category['id'] ?>"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><button class="button-danger small">删除</button></form><?php else: ?><span class="tag" title="请先迁移或删除该分类下的网站">不可删除</span><?php endif; ?></div></td></tr>
+        <tr><td><input type="checkbox" form="batchCategoryForm" name="category_ids[]" value="<?= (int) $category['id'] ?>" aria-label="选择 <?= e($category['name']) ?>"></td><td><?= (int) $category['sort_order'] ?></td><td><strong><?= e($category['name']) ?></strong></td><td><code><?= e($category['slug']) ?></code></td><td><?= $siteCount ?></td><td><?= (int) (isset($homeCategoryConfig[(int) $category['id']]['limit']) ? $homeCategoryConfig[(int) $category['id']]['limit'] : 0) ?> 个<?= ((int) (isset($homeCategoryConfig[(int) $category['id']]['limit']) ? $homeCategoryConfig[(int) $category['id']]['limit'] : 0) === 0) ? '（全部）' : '' ?></td><td><?= (isset($homeCategoryConfig[(int) $category['id']]['mode']) && $homeCategoryConfig[(int) $category['id']]['mode'] === 'page') ? '进入分类页面' : '首页分类位' ?></td><td><div class="actions"><button class="button-secondary small" type="button" data-edit-category data-category-id="<?= (int) $category['id'] ?>" data-category-name="<?= e($category['name']) ?>" data-category-slug="<?= e($category['slug']) ?>" data-category-sort-order="<?= (int) $category['sort_order'] ?>" data-category-home-limit="<?= (int) (isset($homeCategoryConfig[(int) $category['id']]['limit']) ? $homeCategoryConfig[(int) $category['id']]['limit'] : 0) ?>" data-category-home-mode="<?= e(isset($homeCategoryConfig[(int) $category['id']]['mode']) ? $homeCategoryConfig[(int) $category['id']]['mode'] : 'home') ?>">编辑</button><form method="post"><input type="hidden" name="action" value="move_category"><input type="hidden" name="category_id" value="<?= (int) $category['id'] ?>"><input type="hidden" name="direction" value="up"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><button class="button-secondary small">上移</button></form><form method="post"><input type="hidden" name="action" value="move_category"><input type="hidden" name="category_id" value="<?= (int) $category['id'] ?>"><input type="hidden" name="direction" value="down"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><button class="button-secondary small">下移</button></form><?php if ($siteCount === 0): ?><form method="post"><input type="hidden" name="action" value="delete_category"><input type="hidden" name="category_id" value="<?= (int) $category['id'] ?>"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><button class="button-danger small">删除</button></form><?php else: ?><span class="tag" title="请先迁移或删除该分类下的网站">不可删除</span><?php endif; ?></div></td></tr>
       <?php endforeach; ?></tbody></table></div>
       <form method="post" class="grid-form" style="margin-top:18px"><input type="hidden" name="action" value="add_category"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><div class="form-field span-4"><label>新分类名称</label><input name="name" placeholder="例如：办公协作" required></div><div class="form-field span-4"><label>URL 标识（可选）</label><input name="slug" placeholder="office-tools"></div><div class="form-field span-2"><label>优先级</label><input type="number" min="0" name="sort_order" value="100"></div><div class="span-2"><button class="button" type="submit">添加分类</button></div></form>
     </section><?php endif; ?>
 
-    <?php if ($adminView === 'websites'): ?><section class="panel" id="websites"><div class="list-panel-heading"><div><h2>网站与域名状态</h2><p><?= $websiteListCategory ? '当前只显示“' . e($websiteListCategory['name']) . '”分类的 ' . $websiteTotal . ' 个网站。' : '共 ' . $websiteTotal . ' 个网站；可按分类筛选显示。' ?></p></div><form method="get" class="page-size-form"><label>按分类显示 <select name="category_id" onchange="this.form.submit()"><option value="0">全部分类</option><?php foreach ($categories as $category): ?><option value="<?= (int) $category['id'] ?>"<?= $websiteListCategoryId === (int) $category['id'] ? ' selected' : '' ?>><?= e($category['name']) ?>（<?= isset($categoryCounts[(int) $category['id']]) ? (int) $categoryCounts[(int) $category['id']] : 0 ?>）</option><?php endforeach; ?></select></label><label>每页显示 <select name="per_page" onchange="this.form.submit()"><?php foreach (array(20, 50, 100, 200) as $option): ?><option value="<?= $option ?>"<?= $websitePerPage === $option ? ' selected' : '' ?>><?= $option ?> 条</option><?php endforeach; ?></select></label><input type="hidden" name="page" value="1"></form></div>
+    <?php if ($adminView === 'websites'): ?><section class="panel" id="websites"><div class="list-panel-heading"><div><h2>网站与域名状态</h2><p><?= $websiteListCategory ? '当前只显示“' . e($websiteListCategory['name']) . '”分类的 ' . $websiteTotal . ' 个网站。' : '共 ' . $websiteTotal . ' 个网站；可按分类筛选显示。' ?></p></div><form method="get" class="page-size-form"><label>按分类显示 <select name="category_id" onchange="this.form.submit()"><option value="0">全部分类</option><?php foreach ($categories as $category): ?><option value="<?= (int) $category['id'] ?>"<?= $websiteListCategoryId === (int) $category['id'] ? ' selected' : '' ?>><?= e($category['name']) ?>（<?= isset($categoryCounts[(int) $category['id']]) ? (int) $categoryCounts[(int) $category['id']] : 0 ?>）</option><?php endforeach; ?></select></label><label>排序 <select name="sort" onchange="this.form.submit()"><option value="latest"<?= $websiteSort === 'latest' ? ' selected' : '' ?>>最新收录</option><option value="popular"<?= $websiteSort === 'popular' ? ' selected' : '' ?>>人气最高</option><option value="priority"<?= $websiteSort === 'priority' ? ' selected' : '' ?>>优先推荐</option><option value="health_up"<?= $websiteSort === 'health_up' ? ' selected' : '' ?>>健康状态：可用</option><option value="health_down"<?= $websiteSort === 'health_down' ? ' selected' : '' ?>>健康状态：不可用</option><option value="id_asc"<?= $websiteSort === 'id_asc' ? ' selected' : '' ?>>按 ID 小到大</option><option value="id_desc"<?= $websiteSort === 'id_desc' ? ' selected' : '' ?>>按 ID 大到小</option></select></label><label>每页显示 <select name="per_page" onchange="this.form.submit()"><?php foreach (array(20, 50, 100, 200) as $option): ?><option value="<?= $option ?>"<?= $websitePerPage === $option ? ' selected' : '' ?>><?= $option ?> 条</option><?php endforeach; ?></select></label><input type="hidden" name="page" value="1"></form></div>
       <form method="post" id="bulkSiteForm" data-bulk-site-form><input type="hidden" name="action" value="bulk_site_action"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><input type="hidden" name="_return_view" value="websites"><input type="hidden" name="_return_page" value="<?= $websitePage ?>"><input type="hidden" name="_return_per_page" value="<?= $websitePerPage ?>"><input type="hidden" name="_return_category_id" value="<?= (int) $websiteListCategoryId ?>"><div class="bulk-toolbar"><div class="selection-tools"><button class="button-secondary small" type="button" data-select-all-sites>全选本页</button><button class="button-secondary small" type="button" data-invert-site-selection>反选</button><span data-selected-site-count>已选择 0 项</span></div><div class="bulk-actions"><select name="bulk_operation" required><option value="">选择批量操作</option><option value="check">批量检测</option><option value="sync_icon">批量同步图标</option><option value="delete">批量删除</option></select><button class="button-danger small" type="submit">执行操作</button></div></div></form><p class="bulk-network-note">批量检测和图标同步会逐站分段处理。选择大量网站时请保持当前页面打开，系统会持续显示进度，不会用一个长请求阻塞后台。</p>
-      <div class="table-wrap"><table><thead><tr><th><input type="checkbox" form="bulkSiteForm" aria-label="选择本页所有网站" data-select-all-sites-checkbox></th><th>网站</th><th>分类</th><th>主 / 备用域名</th><th>健康状态</th><th>人气</th><th>状态</th><th>操作</th></tr></thead><tbody>
-      <?php if (!$websites): ?><tr><td colspan="8" style="text-align:center;color:#667085;padding:26px">当前页没有网站。</td></tr><?php endif; ?>
+<div class="table-wrap"><table><thead><tr><th><input type="checkbox" form="bulkSiteForm" aria-label="选择本页所有网站" data-select-all-sites-checkbox></th><th class="site-id-column">ID</th><th>网站</th><th>分类</th><th>主 / 备用域名</th><th>健康状态</th><th>人气</th><th>状态</th><th>操作</th></tr></thead><tbody>
+      <?php if (!$websites): ?><tr><td colspan="9" style="text-align:center;color:#667085;padding:26px">当前页没有网站。</td></tr><?php endif; ?>
       <?php foreach ($websites as $website): ?>
-        <tr><td><input type="checkbox" form="bulkSiteForm" name="website_ids[]" value="<?= (int) $website['id'] ?>" data-site-selection aria-label="选择 <?= e($website['title']) ?>"></td><td><div class="table-site"><?php if ($website['icon_path']): ?><img class="favicon" src="<?= e(public_icon_url($website['icon_path'])) ?>" alt=""><?php else: ?><span class="fallback-icon"><?= e(mb_substr($website['title'], 0, 1, 'UTF-8')) ?></span><?php endif; ?><div><strong><?= e($website['title']) ?></strong><span class="url-text" title="<?= e($website['description']) ?>"><?= e($website['description']) ?></span></div></div></td><td><?= e($website['category_name']) ?></td><td><span class="url-text" title="<?= e($website['primary_url']) ?>"><?= e($website['primary_url']) ?></span><?php if ($website['backup_url']): ?><span class="url-text" title="<?= e($website['backup_url']) ?>">备：<?= e($website['backup_url']) ?></span><?php endif; ?></td><td><span class="tag <?= e($website['primary_status']) ?>"><i class="health <?= e($website['primary_status']) ?>"></i> 主 <?= e(status_label($website['primary_status'])) ?></span><?php if ($website['backup_url']): ?> <span class="tag <?= e($website['backup_status']) ?>">备 <?= e(status_label($website['backup_status'])) ?></span><?php endif; ?></td><td><?= number_format((int) $website['clicks']) ?></td><td><?= (int) $website['is_active'] ? '<span class="tag up">展示</span>' : '<span class="tag">隐藏</span>' ?></td><td><div class="actions"><button class="button-secondary small" type="button" data-edit-site='<?= e(json_encode($website, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE)) ?>'>编辑</button><form method="post"><input type="hidden" name="action" value="check_site"><input type="hidden" name="website_id" value="<?= (int) $website['id'] ?>"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><input type="hidden" name="_return_page" value="<?= $websitePage ?>"><input type="hidden" name="_return_per_page" value="<?= $websitePerPage ?>"><button class="button-secondary small">检测</button></form><form method="post"><input type="hidden" name="action" value="sync_icon"><input type="hidden" name="website_id" value="<?= (int) $website['id'] ?>"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><input type="hidden" name="_return_page" value="<?= $websitePage ?>"><input type="hidden" name="_return_per_page" value="<?= $websitePerPage ?>"><button class="button-secondary small">图标</button></form><form method="post"><input type="hidden" name="action" value="delete_site"><input type="hidden" name="website_id" value="<?= (int) $website['id'] ?>"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><input type="hidden" name="_return_page" value="<?= $websitePage ?>"><input type="hidden" name="_return_per_page" value="<?= $websitePerPage ?>"><button class="button-danger small">删除</button></form></div></td></tr>
+        <tr><td><input type="checkbox" form="bulkSiteForm" name="website_ids[]" value="<?= (int) $website['id'] ?>" data-site-selection aria-label="选择 <?= e($website['title']) ?>"></td><td class="site-id-column"><strong><?= (int) $website['id'] ?></strong></td><td><div class="table-site"><?php if ($website['icon_path']): ?><img class="favicon" src="<?= e(public_icon_url($website['icon_path'])) ?>" alt=""><?php else: ?><span class="fallback-icon"><?= e(mb_substr($website['title'], 0, 1, 'UTF-8')) ?></span><?php endif; ?><div><strong class="site-title" title="<?= e($website['title']) ?>"><?= e($website['title']) ?></strong><span class="url-text" title="<?= e($website['description']) ?>"><?= e($website['description']) ?></span></div></div></td><td><?= e($website['category_name']) ?></td><td><span class="url-text" title="<?= e($website['primary_url']) ?>"><?= e($website['primary_url']) ?></span><?php if ($website['backup_url']): ?><span class="url-text" title="<?= e($website['backup_url']) ?>">备：<?= e($website['backup_url']) ?></span><?php endif; ?></td><td><span class="tag <?= e($website['primary_status']) ?>"><i class="health <?= e($website['primary_status']) ?>"></i> 主 <?= e(status_label($website['primary_status'])) ?></span><?php if ($website['backup_url']): ?> <span class="tag <?= e($website['backup_status']) ?>">备 <?= e(status_label($website['backup_status'])) ?></span><?php endif; ?></td><td><?= number_format((int) $website['clicks']) ?></td><td><?= (int) $website['is_active'] ? '<span class="tag up">展示</span>' : '<span class="tag">隐藏</span>' ?></td><td><div class="actions"><button class="button-secondary small" type="button" data-edit-site='<?= e(json_encode($website, JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE)) ?>'>编辑</button><form method="post"><input type="hidden" name="action" value="check_site"><input type="hidden" name="website_id" value="<?= (int) $website['id'] ?>"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><input type="hidden" name="_return_page" value="<?= $websitePage ?>"><input type="hidden" name="_return_per_page" value="<?= $websitePerPage ?>"><button class="button-secondary small">检测</button></form><form method="post"><input type="hidden" name="action" value="sync_icon"><input type="hidden" name="website_id" value="<?= (int) $website['id'] ?>"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><input type="hidden" name="_return_page" value="<?= $websitePage ?>"><input type="hidden" name="_return_per_page" value="<?= $websitePerPage ?>"><button class="button-secondary small">图标</button></form><form method="post"><input type="hidden" name="action" value="delete_site"><input type="hidden" name="website_id" value="<?= (int) $website['id'] ?>"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><input type="hidden" name="_return_page" value="<?= $websitePage ?>"><input type="hidden" name="_return_per_page" value="<?= $websitePerPage ?>"><button class="button-danger small">删除</button></form></div></td></tr>
       <?php endforeach; ?></tbody></table></div>
       <?php if ($websiteTotalPages > 1): ?><nav class="pagination" aria-label="网站分页"><a class="button-secondary small<?= $websitePage <= 1 ? ' disabled' : '' ?>"<?= $websitePage > 1 ? ' href="' . e(website_list_return_url(1, $websitePerPage, $websiteListCategoryId)) . '"' : '' ?>>首页</a><a class="button-secondary small<?= $websitePage <= 1 ? ' disabled' : '' ?>"<?= $websitePage > 1 ? ' href="' . e(website_list_return_url($websitePage - 1, $websitePerPage, $websiteListCategoryId)) . '"' : '' ?>>上一页</a><?php for ($pageNumber = 1; $pageNumber <= $websiteTotalPages; $pageNumber++): ?><?php if ($pageNumber === $websitePage): ?><span class="button-secondary small current-page" aria-current="page"><?= $pageNumber ?></span><?php else: ?><a class="button-secondary small" href="<?= e(website_list_return_url($pageNumber, $websitePerPage, $websiteListCategoryId)) ?>"><?= $pageNumber ?></a><?php endif; ?><?php endfor; ?><a class="button-secondary small<?= $websitePage >= $websiteTotalPages ? ' disabled' : '' ?>"<?= $websitePage < $websiteTotalPages ? ' href="' . e(website_list_return_url($websitePage + 1, $websitePerPage, $websiteListCategoryId)) . '"' : '' ?>>下一页</a><a class="button-secondary small<?= $websitePage >= $websiteTotalPages ? ' disabled' : '' ?>"<?= $websitePage < $websiteTotalPages ? ' href="' . e(website_list_return_url($websiteTotalPages, $websitePerPage, $websiteListCategoryId)) . '"' : '' ?>>尾页</a></nav><?php endif; ?>
     </section><?php endif; ?>
@@ -1171,9 +1489,9 @@ ob_start(function ($output) use ($redirectDelay) { return str_replace('<input va
 
 <div class="modal-backdrop" id="csvImportModal"><section class="modal"><div class="modal-header"><h2>导入网站 CSV</h2><button class="icon-button" type="button" data-close-modal="csvImportModal">×</button></div><p class="batch-import-intro">请先导出当前数据作为模板。CSV 首行应包含：<code>分类名称</code>、<code>网站标题</code>、<code>网站介绍</code>、<code>主域名</code>、<code>备用域名</code>、<code>显示优先级</code>、<code>前台展示</code>、<code>精选推荐</code>。分类名称须已存在；同域名、无效地址和错误分类会自动跳过。</p><form method="post" enctype="multipart/form-data" class="grid-form"><input type="hidden" name="action" value="import_websites_csv"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><input type="hidden" name="_return_view" value="websites"><input type="hidden" name="_return_page" value="<?= $websitePage ?>"><input type="hidden" name="_return_per_page" value="<?= $websitePerPage ?>"><div class="form-field span-12"><label>CSV 文件</label><input type="file" name="csv_file" accept=".csv,text/csv" required><span class="form-hint">仅支持 UTF-8 CSV，最大 2MB、每次最多导入 200 条。导入不会自动访问目标网站；完成后可在列表中批量检测并同步图标。</span></div><div class="span-12"><button class="button" type="submit">开始导入 CSV</button></div></form></section></div>
 
-<div class="modal-backdrop" id="editCategoryModal"><section class="modal"><div class="modal-header"><h2>编辑分类资料</h2><button class="icon-button" type="button" data-close-modal="editCategoryModal">×</button></div><p style="margin-top:0;color:#667085">可同时修改分类优先级、显示名称和 URL 标识。标识变更不会影响已归属到该分类的网站。</p><form method="post" class="grid-form" id="editCategoryForm"><input type="hidden" name="action" value="update_category"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><input type="hidden" name="category_id" id="edit_category_record_id"><div class="form-field span-4"><label>优先级</label><input type="number" min="0" name="sort_order" id="edit_category_sort_order" required></div><div class="form-field span-8"><label>分类名称</label><input name="name" id="edit_category_name" maxlength="60" required></div><div class="form-field span-12"><label>标识</label><input name="slug" id="edit_category_slug" pattern="[A-Za-z0-9-]+" placeholder="developer-tools" required><span class="form-hint">使用英文字母、数字和连字符；须保持唯一。</span></div><div class="span-12"><button class="button" type="submit">保存分类资料</button></div></form></section></div>
+<div class="modal-backdrop" id="editCategoryModal"><section class="modal"><div class="modal-header"><h2>编辑分类资料</h2><button class="icon-button" type="button" data-close-modal="editCategoryModal">×</button></div><p style="margin-top:0;color:#667085">可同时修改分类优先级、显示名称和 URL 标识。标识变更不会影响已归属到该分类的网站。</p><form method="post" class="grid-form" id="editCategoryForm"><input type="hidden" name="action" value="update_category"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><input type="hidden" name="category_id" id="edit_category_record_id"><div class="form-field span-4"><label>优先级</label><input type="number" min="0" name="sort_order" id="edit_category_sort_order" required></div><div class="form-field span-8"><label>分类名称</label><input name="name" id="edit_category_name" maxlength="60" required></div><div class="form-field span-12"><label>标识</label><input name="slug" id="edit_category_slug" pattern="[A-Za-z0-9-]+" placeholder="developer-tools" required><span class="form-hint">使用英文字母、数字和连字符；须保持唯一。</span></div><div class="form-field span-6"><label>首页显示数量</label><input type="number" min="0" max="500" name="home_category_limit" id="edit_category_home_limit" value="0"><span class="form-hint">0 表示首页显示该分类全部网站；超出数量可从“更多”进入分类页。</span></div><div class="form-field span-6"><label>分类导航</label><select name="home_category_mode" id="edit_category_home_mode"><option value="home">首页分类位</option><option value="page">进入分类页面</option></select></div><div class="span-12"><button class="button" type="submit">保存分类资料</button></div></form></section></div>
 
-<div class="modal-backdrop<?= $editOpenModal ?>" id="editSiteModal"><section class="modal"><div class="modal-header"><h2>编辑网站资料</h2><button class="icon-button" type="button" data-close-modal="editSiteModal">×</button></div><?php if ($editMetadata): ?><div class="preview"><span class="fallback-icon">I</span><div><p class="preview-title"><?= e($editMetadata['title']) ?></p><p class="preview-desc">已读取网站数据，可继续调整后保存修改。</p></div></div><?php endif; ?><form method="post" class="grid-form" id="editSiteForm"><input type="hidden" name="action" value="update_site"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><input type="hidden" name="website_id" id="edit_id" value="<?= e($editPrefill ? $editPrefill['id'] : '') ?>"><div class="form-field span-12"><label>主域名</label><div class="input-with-action"><input name="primary_url" id="edit_primary_url" value="<?= e($editPrefill ? $editPrefill['primary_url'] : '') ?>" required><button class="button-secondary" type="button" data-inspect-edit-site>读取网站数据</button></div><label class="inline-check"><input type="checkbox" name="add_www" id="edit_add_www"<?= $editPrefill && !empty($editPrefill['add_www']) ? ' checked' : '' ?>> 自动补齐 www</label></div><div class="form-field span-6"><label>网站标题</label><input name="title" id="edit_title" value="<?= e($editPrefill ? $editPrefill['title'] : '') ?>" required></div><div class="form-field span-6"><label>所属分类</label><select name="category_id" id="edit_category_id"><?php foreach ($categories as $category): ?><option value="<?= (int) $category['id'] ?>"<?= $editPrefill && (int) $editPrefill['category_id'] === (int) $category['id'] ? ' selected' : '' ?>><?= e($category['name']) ?></option><?php endforeach; ?></select></div><div class="form-field span-12"><label>网站介绍</label><textarea name="description" id="edit_description"><?= e($editPrefill ? $editPrefill['description'] : '') ?></textarea></div><div class="form-field span-6"><label>图标 URL（可选）</label><input name="icon_url" id="edit_icon_url" value="<?= e($editPrefill && isset($editPrefill['icon_url']) ? $editPrefill['icon_url'] : '') ?>" placeholder="读取后会自动填入"></div><div class="form-field span-6"><label>备用域名（可选）</label><input name="backup_url" id="edit_backup_url" value="<?= e($editPrefill ? $editPrefill['backup_url'] : '') ?>"></div><div class="settings-row span-6"><div class="form-field"><label>显示优先级</label><input type="number" min="0" name="sort_order" id="edit_sort_order" value="<?= e($editPrefill ? $editPrefill['sort_order'] : '100') ?>"></div><div class="form-field"><label>显示选项</label><div class="checkbox-options"><label><input type="checkbox" name="is_featured" id="edit_is_featured"<?= $editPrefill && !empty($editPrefill['is_featured']) ? ' checked' : '' ?>> 精选推荐</label><label><input type="checkbox" name="is_active" id="edit_is_active"<?= !$editPrefill || !empty($editPrefill['is_active']) ? ' checked' : '' ?>> 前台展示</label></div></div></div><div class="span-12"><button class="button" type="submit" data-edit-save-button>保存修改</button><span class="form-hint" data-edit-save-hint>读取仅回填当前表单；点击“保存修改”后才会同步更新网站列表。</span></div></form></section></div>
+<div class="modal-backdrop<?= $editOpenModal ?>" id="editSiteModal"><section class="modal"><div class="modal-header"><h2>编辑网站资料</h2><button class="icon-button" type="button" data-close-modal="editSiteModal">×</button></div><?php if ($editMetadata): ?><div class="preview"><span class="fallback-icon">I</span><div><p class="preview-title"><?= e($editMetadata['title']) ?></p><p class="preview-desc">已读取网站数据，可继续调整后保存修改。</p></div></div><?php endif; ?><form method="post" class="grid-form" id="editSiteForm"><input type="hidden" name="action" value="update_site"><input type="hidden" name="_csrf" value="<?= e(csrf_token()) ?>"><input type="hidden" name="website_id" id="edit_id" value="<?= e($editPrefill ? $editPrefill['id'] : '') ?>"><div class="form-field span-4"><label>网站 ID</label><input type="number" min="1" name="new_website_id" id="edit_new_id" value="<?= e($editPrefill ? $editPrefill['id'] : '') ?>" required><span class="form-hint">可修改真实 ID，必须保持唯一。</span></div><div class="form-field span-8"><label>主域名</label><div class="input-with-action"><input name="primary_url" id="edit_primary_url" value="<?= e($editPrefill ? $editPrefill['primary_url'] : '') ?>" required><button class="button-secondary" type="button" data-inspect-edit-site>读取网站数据</button></div><label class="inline-check"><input type="checkbox" name="add_www" id="edit_add_www"<?= $editPrefill && !empty($editPrefill['add_www']) ? ' checked' : '' ?>> 自动补齐 www</label></div><div class="form-field span-6"><label>网站标题</label><input name="title" id="edit_title" value="<?= e($editPrefill ? $editPrefill['title'] : '') ?>" required></div><div class="form-field span-6"><label>所属分类</label><select name="category_id" id="edit_category_id"><?php foreach ($categories as $category): ?><option value="<?= (int) $category['id'] ?>"<?= $editPrefill && (int) $editPrefill['category_id'] === (int) $category['id'] ? ' selected' : '' ?>><?= e($category['name']) ?></option><?php endforeach; ?></select></div><div class="form-field span-12"><label>网站介绍</label><textarea name="description" id="edit_description"><?= e($editPrefill ? $editPrefill['description'] : '') ?></textarea></div><div class="form-field span-6"><label>图标 URL（可选）</label><input name="icon_url" id="edit_icon_url" value="<?= e($editPrefill && isset($editPrefill['icon_url']) ? $editPrefill['icon_url'] : '') ?>" placeholder="读取后会自动填入"></div><div class="form-field span-6"><label>备用域名（可选）</label><input name="backup_url" id="edit_backup_url" value="<?= e($editPrefill ? $editPrefill['backup_url'] : '') ?>"></div><div class="form-field span-6"><label>添加日期</label><input type="date" name="created_at" id="edit_created_at" value="<?= e($editPrefill && !empty($editPrefill['created_at']) ? substr($editPrefill['created_at'], 0, 10) : '') ?>" required></div><div class="form-field span-6"><label>人气</label><input type="number" min="0" max="2147483647" name="clicks" id="edit_clicks" value="<?= e($editPrefill ? $editPrefill['clicks'] : '0') ?>" required></div><div class="settings-row span-6"><div class="form-field"><label>显示优先级</label><input type="number" min="0" name="sort_order" id="edit_sort_order" value="<?= e($editPrefill ? $editPrefill['sort_order'] : '100') ?>"></div><div class="form-field"><label>显示选项</label><div class="checkbox-options"><label><input type="checkbox" name="is_featured" id="edit_is_featured"<?= $editPrefill && !empty($editPrefill['is_featured']) ? ' checked' : '' ?>> 精选推荐</label><label><input type="checkbox" name="is_active" id="edit_is_active"<?= !$editPrefill || !empty($editPrefill['is_active']) ? ' checked' : '' ?>> 前台展示</label></div></div></div><div class="span-12"><button class="button" type="submit" data-edit-save-button>保存修改</button><span class="form-hint" data-edit-save-hint>读取仅回填当前表单；点击“保存修改”后才会同步更新网站列表。</span></div></form></section></div>
 <?php if ($addSitePrefill): ?><script>window.addSitePrefill = <?= json_encode($addSitePrefill, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE) ?>; window.addSiteError = <?= json_encode($error, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE) ?>;</script><?php endif; ?>
 <?php if ($batchImportPrefill): ?><script>window.batchImportPrefill = <?= json_encode($batchImportPrefill, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE) ?>; window.batchImportError = <?= json_encode($error, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE) ?>;</script><?php endif; ?>
 <?php if ($editPrefill && $action === 'inspect_edit_site' && $error): ?><script>window.editSiteError = <?= json_encode($error, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE) ?>;</script><?php endif; ?>

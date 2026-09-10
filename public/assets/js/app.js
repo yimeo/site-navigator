@@ -1,4 +1,36 @@
 (function () {
+  var themeNames = ['daylight', 'night', 'forest', 'twilight', 'china-red', 'glazed-yellow', 'cloud-gray'];
+  function applyTheme(theme) {
+    theme = themeNames.indexOf(theme) >= 0 ? theme : 'daylight';
+    document.body.classList.remove('theme-night', 'theme-forest', 'theme-twilight', 'theme-china-red', 'theme-glazed-yellow', 'theme-cloud-gray');
+    if (theme !== 'daylight') { document.body.classList.add('theme-' + theme); }
+    var switcher = document.querySelector('[data-theme-switch]');
+    if (switcher) { switcher.value = theme; }
+    try { window.localStorage.setItem('site-navigator-theme', theme); document.cookie = 'site_navigator_theme=' + encodeURIComponent(theme) + '; path=/; max-age=31536000; SameSite=Lax'; } catch (error) {}
+  }
+  var savedTheme = window.siteNavigatorDefaultTheme || 'daylight';
+  try { savedTheme = window.localStorage.getItem('site-navigator-theme') || savedTheme; } catch (error) {}
+  applyTheme(savedTheme);
+  var themeSwitch = document.querySelector('[data-theme-switch]');
+  if (themeSwitch) {
+    themeSwitch.addEventListener('click', function (event) { event.preventDefault(); event.stopPropagation(); });
+    themeSwitch.addEventListener('pointerdown', function (event) { event.stopPropagation(); });
+    themeSwitch.addEventListener('change', function (event) { event.stopPropagation(); applyTheme(themeSwitch.value); });
+  }
+  function placeMobileThemePicker() {
+    var actions = document.querySelector('.topbar .header-actions');
+    var brand = document.querySelector('.sidebar .brand');
+    if (!actions || !brand) { return; }
+    if (window.matchMedia('(max-width: 600px)').matches) {
+      if (actions.parentNode !== brand) { brand.appendChild(actions); }
+    } else {
+      var topbar = document.querySelector('.topbar');
+      if (topbar && actions.parentNode !== topbar) { topbar.appendChild(actions); }
+    }
+  }
+  placeMobileThemePicker();
+  window.addEventListener('resize', placeMobileThemePicker);
+
   function openModal(id) {
     var modal = document.getElementById(id);
     if (modal) {
@@ -183,11 +215,14 @@
     button.addEventListener('click', function () {
       var site = JSON.parse(button.getAttribute('data-edit-site'));
       document.getElementById('edit_id').value = site.id;
+      if (document.getElementById('edit_new_id')) { document.getElementById('edit_new_id').value = site.id; }
       document.getElementById('edit_primary_url').value = site.primary_url || '';
       document.getElementById('edit_title').value = site.title || '';
       document.getElementById('edit_category_id').value = site.category_id || '';
       document.getElementById('edit_description').value = site.description || '';
       document.getElementById('edit_backup_url').value = site.backup_url || '';
+      if (document.getElementById('edit_created_at')) { document.getElementById('edit_created_at').value = String(site.created_at || '').slice(0, 10); }
+      if (document.getElementById('edit_clicks')) { document.getElementById('edit_clicks').value = site.clicks || 0; }
       document.getElementById('edit_icon_url').value = '';
       document.getElementById('edit_add_www').checked = false;
       if (document.getElementById('edit_prefer_https')) { document.getElementById('edit_prefer_https').checked = true; }
@@ -425,6 +460,8 @@
     document.getElementById('edit_category_name').value = button.getAttribute('data-category-name') || '';
     document.getElementById('edit_category_slug').value = button.getAttribute('data-category-slug') || '';
     document.getElementById('edit_category_sort_order').value = button.getAttribute('data-category-sort-order') || 0;
+    document.getElementById('edit_category_home_limit').value = button.getAttribute('data-category-home-limit') || 0;
+    document.getElementById('edit_category_home_mode').value = button.getAttribute('data-category-home-mode') || 'home';
     openModal('editCategoryModal');
   });
 
@@ -505,7 +542,7 @@
   var overlay = null;
   var stageTimer = null;
   var slowTimer = null;
-  var operationActions = ['bulk_site_action', 'bulk_import_sites', 'import_websites_csv', 'check_site', 'sync_icon', 'delete_site', 'inspect', 'inspect_edit_site', 'save_site', 'update_site', 'add_category', 'update_category', 'delete_category', 'move_category', 'save_site_settings', 'save_redirect_settings', 'update_admin_account'];
+  var operationActions = ['bulk_site_action', 'bulk_import_sites', 'import_websites_csv', 'check_site', 'sync_icon', 'delete_site', 'inspect', 'inspect_edit_site', 'save_site', 'update_site', 'add_category', 'update_category', 'delete_category', 'move_category', 'save_site_settings', 'save_redirect_settings', 'update_admin_account', 'batch_category_display_settings'];
 
     function createOverlay() {
       if (overlay) { return overlay; }

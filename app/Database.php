@@ -152,6 +152,10 @@ class Database
             'redirect_link_display' => 'id',
             'redirect_interstitial_delay' => '2.6',
             'redirect_interstitial_template' => "正在为你打开 {{site_title}}\n已为你确认可用访问地址。若浏览器没有自动跳转，请点击下方按钮继续。",
+            'home_sort_default' => 'priority',
+            'home_sort_priority_visible' => '1',
+            'home_sort_popular_visible' => '1',
+            'home_sort_latest_visible' => '1',
         );
         $statement = $pdo->prepare('INSERT OR IGNORE INTO settings (setting_key, setting_value) VALUES (:key, :value)');
         foreach ($settings as $key => $value) {
